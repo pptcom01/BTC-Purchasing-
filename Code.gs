@@ -1,4 +1,4 @@
-// ==========================================
+﻿// ==========================================
 // CONFIGURATION (บริษัท บุรีรัมย์ธงชัยก่อสร้าง จำกัด - BTC)
 // ==========================================
 // เลิกใช้ fallback key ในไฟล์ (2026-09-18) — ค่าจริงเก็บใน Script Properties ที่ตั้งผ่านหน้าเว็บแล้ว
@@ -243,7 +243,7 @@ function supabaseRequest(method, path, body, prefs) {
     muteHttpExceptions: true
   };
   if (prefs) options.headers['Prefer'] = prefs;
-  if (body !== undefined && body !== null) options.payload = JSON.stringify(body);
+  if (body !== undefined && body !== null) options.payload = JSON.stringify(normalizeSupabasePayloadDates(body));
 
   const resp = UrlFetchApp.fetch(baseUrl.replace(/\/+$/, '') + path, options);
   const code = resp.getResponseCode();
@@ -254,6 +254,36 @@ function supabaseRequest(method, path, body, prefs) {
     throw err;
   }
   try { return text ? JSON.parse(text) : null; } catch (e) { return text; }
+}
+
+// แปลงค่าวันที่ให้ปลอดภัยกับคอลัมน์ชนิด date ของ Postgres — ค่าอ่านไม่ได้ ('-', '', ข้อความมั่ว) = null
+// (เดิมส่ง "-" ไป → Supabase HTTP 400: invalid input syntax for type date — เกิดจริงใน RESYNC 2026-09-23)
+function normalizeSupabaseDateValue(v) {
+  if (v === undefined || v === null) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd');
+  const s = String(v).trim();
+  if (!s || s === '-') return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
+  const m = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})$/);
+  if (m) return (m[3].length === 2 ? '20' + m[3] : m[3]) + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+  const d = new Date(s);
+  return (!isNaN(d.getTime())) ? Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy-MM-dd') : null;
+}
+
+// normalize คอลัมน์วันที่/เวลาทุกชั้นของ payload ก่อนยิง Supabase (object เดี่ยวหรือ array batch ก็ครอบ)
+function normalizeSupabasePayloadDates(body) {
+  const normRow = function (row) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+    Object.keys(row).forEach(function (k) {
+      if (k === 'date' || k === 'billing_date') row[k] = normalizeSupabaseDateValue(row[k]);
+      else if (k === 'submitted_at') {
+        if (row[k] === undefined || row[k] === null || row[k] === '' || row[k] === '-') row[k] = null;
+      }
+    });
+    return row;
+  };
+  if (Array.isArray(body)) return body.map(normRow);
+  return normRow(body);
 }
 
 // อ่านบิลทั้งหมดจาก Supabase (ใช้แทน Google Sheets เป็นแหล่งข้อมูลหลักของหน้าเว็บ)
@@ -281,7 +311,7 @@ function saveToSupabase(receiptData, imageUrl, sourceType, sender) {
     ref_no: receiptData.ref_no || null,
     ref_label: receiptData.ref_label || null,
     po_number: receiptData.po_number || '-',
-    date: receiptData.date || null,
+    date: normalizeSupabaseDateValue(receiptData.date),
     store_name: receiptData.store_name || '',
     category: receiptData.category || 'ทั่วไป',
     items_summary: receiptData.items_summary || '',
@@ -361,9 +391,23 @@ function updateSupabaseReceipt(docKey, fields, systemRecordNo) {
     }
   });
   if (fields.items !== undefined) patch.items = fields.items;
+  // 🛡️ วันที่อ่านไม่ได้ ('-'/'') = null ห้ามส่ง "-" ไป Supabase (HTTP 400 invalid input syntax for type date)
+  if (patch.date !== undefined) patch.date = normalizeSupabaseDateValue(patch.date);
+  // 🛡️ คง SRN ล่าสุดลงแถวด้วยเสมอ (self-heal แถวเก่าที่ Supabase ยังไม่มี system_record_no)
+  if (!isNaN(srn) && srn > 0) patch.system_record_no = srn;
   if (Object.keys(patch).length === 0) return { ok: true };
-  supabaseRequest('patch', '/rest/v1/receipts' + query, patch);
-  return { ok: true };
+  // Prefer: return=representation → PostgREST คืนแถวที่โดนอัปเดตจริง (เดิม 204 ว่าง นับ matched ไม่ได้ — patch โดน 0 แถวจะผ่านเงียบ ๆ)
+  let updated = supabaseRequest('patch', '/rest/v1/receipts' + query, patch, 'return=representation');
+  // 🛡️ PostgREST patch โดน 0 แถว = ตอบสำเร็จเงียบ ๆ (เช่น patch ด้วย SRN แต่แถวใน Supabase ยังไม่มี SRN)
+  //     → ลองซ้ำด้วย doc_key (ตัวตนหลักของ Supabase) — กัน "แก้แล้วตารางไม่เปลี่ยนตาม" เพราะ fallback โหลด Supabase กลับมาโชว์ค่าเก่า
+  if (Array.isArray(updated) && updated.length === 0 && !isNaN(srn) && srn > 0 && docKey) {
+    writeLog('⚠️ SUPABASE', 'updateSupabaseReceipt: patch ด้วย system_record_no=' + srn + ' โดน 0 แถว — ลองซ้ำด้วย doc_key (เขียน SRN ลงแถวด้วย)');
+    updated = supabaseRequest('patch', '/rest/v1/receipts?doc_key=eq.' + encodeURIComponent(docKey), patch, 'return=representation');
+  }
+  if (Array.isArray(updated) && updated.length === 0) {
+    writeLog('⚠️ SUPABASE', 'updateSupabaseReceipt: patch ไม่โดนแถวใดเลย (doc_key=' + docKey + ', srn=' + (isNaN(srn) ? '-' : srn) + ') — ตรวจว่ามีบิลนี้ใน Supabase จริง');
+  }
+  return { ok: true, matched: Array.isArray(updated) ? updated.length : null };
 }
 
 // ตรวจ role ของ Supabase key (JWT: ส่วน payload มีฟิลด์ role) — กันเผลอใช้ anon key
@@ -816,30 +860,130 @@ function getReceiptData() {
   
   const headers = data[0];
   const rows = data.slice(1);
-  
-  return rows.map((row, index) => {
-    let obj = { id: (index + 1).toString() };
-    headers.forEach((h, i) => {
-      let key = h.toString().toLowerCase().replace(/\./g, '').replace(/ /g, '_');
-      obj[key] = row[i];
-    });
-    
-    let imgVal = obj['image_url'] || obj['image_link'] || '';
-    if (typeof imgVal === 'string' && imgVal.includes('HYPERLINK')) {
-      let match = imgVal.match(/HYPERLINK\("([^"]+)"/i);
-      if (match) imgVal = match[1];
-    }
-    obj['image_url'] = imgVal;
-    
-    if (obj['timestamp'] instanceof Date) {
-      obj['timestamp'] = Utilities.formatDate(obj['timestamp'], 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
-    }
-    if (obj['date'] instanceof Date) {
-      obj['date'] = Utilities.formatDate(obj['date'], 'Asia/Bangkok', 'yyyy-MM-dd');
-    }
-    
-    return obj;
+
+  return rows.map((row, index) => mapSheetRowToReceiptObject(headers, row, index));
+}
+
+// แปลง 1 แถวชีต (Receipts) เป็น Object ฟอร์มเดียวกับ getReceiptData —
+// ใช้ร่วมกันระหว่างโหลดทั้งตาราง (getReceiptData) และโหลดรายการเดียว (getSingleReceipt) เพื่อไม่ให้ logic เพี้ยนกัน
+function mapSheetRowToReceiptObject(headers, row, index) {
+  let obj = { id: (index + 1).toString() };
+  headers.forEach((h, i) => {
+    let key = h.toString().toLowerCase().replace(/\./g, '').replace(/ /g, '_');
+    obj[key] = row[i];
   });
+
+  let imgVal = obj['image_url'] || obj['image_link'] || '';
+  if (typeof imgVal === 'string' && imgVal.includes('HYPERLINK')) {
+    let match = imgVal.match(/HYPERLINK\("([^"]+)"/i);
+    if (match) imgVal = match[1];
+  }
+  obj['image_url'] = imgVal;
+
+  if (obj['timestamp'] instanceof Date) {
+    obj['timestamp'] = Utilities.formatDate(obj['timestamp'], 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  }
+  if (obj['date'] instanceof Date) {
+    obj['date'] = Utilities.formatDate(obj['date'], 'Asia/Bangkok', 'yyyy-MM-dd');
+  }
+
+  return obj;
+}
+
+// โหลดข้อมูลบิลเดียว (หลัง "บันทึกการแก้ไข" ให้รีเฟรชเฉพาะรายการนั้น ไม่ต้องโหลดตารางใหม่ทั้งก้อน)
+//   จับด้วย System Record No. ก่อน (ตัวตนหลัก 100%) ถ้าไม่มีใช้ Doc Key — เหมือน findReceiptRowByAny ที่ฝั่งลงชีต
+function getSingleReceipt(payload) {
+  const __guard = requireApiSession_(payload); if (!__guard.ok) return __guard.res;
+  try {
+    const ss = getSpreadsheet();
+    const sheet = ss.getSheetByName('บิลจัดซื้อ (Receipts)') || ss.getActiveSheet();
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return [];
+    const headers = data[0];
+    const rows = data.slice(1);
+    const srn = (payload && payload.system_record_no !== undefined && payload.system_record_no !== null && payload.system_record_no !== '') ? Number(payload.system_record_no) : NaN;
+    const dk = String(payload && (payload.doc_key || payload.docKey) || '').trim();
+    for (let i = 0; i < rows.length; i++) {
+      const obj = mapSheetRowToReceiptObject(headers, rows[i], i);
+      const objSrn = Number(obj['system_record_no']);
+      const objDk = String(obj['doc_key'] || '').trim();
+      if ((!isNaN(srn) && srn > 0 && objSrn === srn) || (dk && objDk === dk)) {
+        return [obj];
+      }
+    }
+    return [];
+  } catch (err) {
+    writeLog('❌ ERROR', 'getSingleReceipt: ' + err.toString());
+    return [];
+  }
+}
+
+// 💡 ตัวเลือกช่องกรอกจากประวัติจริงในฐานข้อมูล (ลดภาระการคีย์ + ให้สินค้าเดียวกันสะกด/เว้นวรรคแบบเดียวกัน)
+// หลักการ: รวมค่าที่เคยบันทึกทั้งหมด → นับความถี่ (ตัด case/ช่องว่างซ้ำ) → เลือก "สะกดที่ใช้บ่อยสุด" เป็นตัวแทน
+// → เรียงใช้บ่อยก่อน ให้หน้าเว็บเติม datalist (autocomplete) ให้ผู้ใช้เลือกแทนพิมพ์เอง
+function getEditFieldSuggestions() {
+  try {
+    const rows = supabaseRequest('get', '/rest/v1/receipts?select=items,store_name,vehicle_registration,company_name,job_name,requester,pay_approver&order=submitted_at.desc&limit=2000');
+    const list = Array.isArray(rows) ? rows : [];
+
+    const newCounter = function () { return {}; };
+    const pushVariant = function (counter, raw) {
+      const s = String(raw === null || raw === undefined ? '' : raw).trim();
+      if (!s || s === '-' || s === 'undefined') return;
+      const key = s.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!key) return;
+      const entry = counter[key] || (counter[key] = {});
+      entry[s] = (entry[s] || 0) + 1;
+    };
+    const topFromCounter = function (counter, limit) {
+      return Object.keys(counter).map(function (key) {
+        const variants = counter[key];
+        let best = '', bestN = 0;
+        Object.keys(variants).forEach(function (sp) {
+          const n = variants[sp];
+          // ตัวแทน = สะกดที่ใช้บ่อยสุด (เสมอกันเลือกสะกดที่ยาว/เต็มกว่า)
+          if (n > bestN || (n === bestN && sp.length > best.length)) { best = sp; bestN = n; }
+        });
+        return { text: best, count: bestN };
+      }).sort(function (a, b) { return b.count - a.count || a.text.localeCompare(b.text, 'th'); }).slice(0, limit || 300);
+    };
+
+    const cItem = newCounter(), cUnit = newCounter(), cStore = newCounter(), cVehicle = newCounter();
+    const cCompany = newCounter(), cJob = newCounter(), cRequester = newCounter(), cPay = newCounter();
+    list.forEach(function (r) {
+      if (!r) return;
+      const items = Array.isArray(r.items) ? r.items : [];
+      items.forEach(function (it) {
+        if (!it) return;
+        pushVariant(cItem, it.name);
+        pushVariant(cUnit, it.unit);
+      });
+      pushVariant(cStore, r.store_name);
+      pushVariant(cVehicle, r.vehicle_registration);
+      pushVariant(cCompany, r.company_name);
+      pushVariant(cJob, r.job_name);
+      pushVariant(cRequester, r.requester);
+      pushVariant(cPay, r.pay_approver);
+    });
+
+    writeLog('💡 SUGGEST', 'getEditFieldSuggestions: จาก ' + list.length + ' บิล → สินค้า ' + Object.keys(cItem).length + ', ร้าน ' + Object.keys(cStore).length + ' รูปแบบ');
+    return {
+      success: true,
+      suggestions: {
+        items: topFromCounter(cItem, 400),
+        units: topFromCounter(cUnit, 60),
+        stores: topFromCounter(cStore, 200),
+        vehicles: topFromCounter(cVehicle, 100),
+        companies: topFromCounter(cCompany, 150),
+        jobs: topFromCounter(cJob, 150),
+        requesters: topFromCounter(cRequester, 100),
+        pay_approvers: topFromCounter(cPay, 100)
+      }
+    };
+  } catch (err) {
+    writeLog('⚠️ SUGGEST', 'getEditFieldSuggestions: ' + err.toString());
+    return { success: false, message: err.toString() };
+  }
 }
 
 // ==========================================
@@ -1519,12 +1663,6 @@ function processReceiptSubmission(messageId, senderId, source, replyToken) {
   // 🛡️ ตั้งชื่อไฟล์ Drive ให้มีเลข TR + เลขเอกสาร (หา/อ้างอิงง่าย — แก้ช่องว่างเดิมที่ชื่อไฟล์ไม่มีเลขเอกสาร)
   try { renameReceiptDriveFile(receiptData, imageUrl); } catch (rErr) { writeLog('⚠️ DRIVE-RENAME', 'hook: ' + rErr.toString()); }
 
-  // AI Template Library (Phase 1): เก็บตัวอย่างบิลที่ยังไม่มีแม่แบบครอบ → รอ User ยืนยันที่เมนู "เอกสารสำหรับ AI"
-  try {
-    ensureTemplateCandidateIfNeeded(imageBlob, receiptData, sender);
-  } catch (tErr) {
-    writeLog('⚠️ AI_TEMPLATE', 'hook webhook error: ' + tErr.toString());
-  }
 
   // Background Auto-Matcher (Round B): หาคู่ PO↔บิลอัตโนมัติหลังบันทึกบิล (ไม่บล็อก — ขึ้น [แนะนำการจับคู่] รอ User ยืนยัน)
   try {
@@ -1920,13 +2058,7 @@ function resyncReceiptsBetweenStores() {
       ref_no: clean(pick(row, 'Ref No.')),
       ref_label: clean(pick(row, 'Ref Label')),
       po_number: clean(pick(row, 'PO No.')) || '-',
-      date: (function (v) {
-        if (v === '' || v === null || v === undefined) return null;
-        if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd');
-        const s = String(v).trim();
-        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
-        return s || null;
-      })(pick(row, 'Date')),
+      date: normalizeSupabaseDateValue(pick(row, 'Date')),
       store_name: clean(pick(row, 'Supplier Name')) || '',
       category: clean(pick(row, 'Category')) || 'ทั่วไป',
       items_summary: clean(pick(row, 'Items Summary')) || '',
@@ -2162,227 +2294,26 @@ function getOrCreateAITemplateSubFolder(subFolderName) {
 
 // คำนวณ pHash (perceptual hash) 64-bit จาก Blob ภาพ — ใช้ matching layout
 // ใช้ Apps Script built-in: resize -> grayscale -> DCT -> threshold -> 64-bit hex
-function computeLayoutSignature(imageBlob) {
-  try {
-    // Resize 32x32 grayscale
-    const img = imageBlob.getAs('image/png');
-    const resized = ImagesService.resize(img, 32, 32);
-    // Apps Script ไม่มี DCT ตรง ๆ — ใช้วิธีประมาณ: mean threshold บน 32x32
-    // สร้าง canvas ผ่าน HTML service ไม่ได้ใน server-side → ใช้ algorithm แบบง่าย:
-    // 1. แปลงเป็น base64 -> ใช้ UrlFetch เรียก Cloud Vision? ไม่คุ้ม
-    // 2. Fallback: ใช้ pHash library แบบ pure JS ผ่าน eval? ไม่ปลอดภัย
-    // 3. Practical: ใช้ average hash (aHash) 64-bit แทน — เร็ว พอใช้
-    //    aHash: resize 8x8 -> grayscale -> mean threshold -> 64 bits
-    // Apps Script มี ImagesService.getPixels() ไม่ได้ → ใช้ workaround:
-    //   Save temp -> ใช้ Drive API? ซับซ้อน
-    //   Simplest: ใช้ file size + dimensions + color histogram signature แทน
-    //   แต่เพื่อ Phase 1 ให้ทำงานก่อน — ใช้ signature แบบ simple: "WxH:filesize:md5prefix"
-    //   Phase 2 จะย้ายไป compute pHash จริงที่ client-side (browser) แล้วส่งมา
-    const bytes = imageBlob.getBytes();
-    const hash = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes);
-    const md5hex = hash.map(b => (b < 16 ? '0' : '') + (b & 0xFF).toString(16)).join('');
-    const w = 32, h = 32; // placeholder
-    return 'aHash:' + w + 'x' + h + ':' + md5hex.slice(0, 16); // 16 hex = 64 bits
-  } catch (e) {
-    writeLog('⚠️ AI_TEMPLATE', 'computeLayoutSignature error: ' + e.toString());
-    return '';
-  }
-}
 
-// ค้นหา template ที่ match (rule-based: doc_type + hamming distance)
-function findMatchingTemplates(docType, signature, threshold, limit) {
-  const url = getSupabaseUrl();
-  const key = getSupabaseKey();
-  if (!url || !key) return [];
-  try {
-    const params = new URLSearchParams({
-      p_doc_type: docType,
-      p_signature: signature || '',
-      p_threshold: String(threshold || 10),
-      p_limit: String(limit || 3)
-    });
-    const resp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/rpc/find_matching_templates?' + params, {
-      method: 'GET',
-      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key },
-      muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() === 200) {
-      const data = JSON.parse(resp.getContentText());
-      return Array.isArray(data) ? data : [];
-    }
-    return [];
-  } catch (e) {
-    writeLog('⚠️ AI_TEMPLATE', 'findMatchingTemplates error: ' + e.toString());
-    return [];
-  }
-}
+
+
 
 // สร้าง Template Candidate จากบิลใหม่ที่ AI อ่าน (status=pending)
-function createTemplateCandidate(imageBlob, predictedDocType, aiResult, senderEmail) {
-  // 🛡️ 2026-09-22 session guard: เก็บตัวอย่างบิลเข้า Drive + ai_templates (เรียกภายในจาก webhook ผ่าน runAsInternal_)
-  const __guard = requireApiSession_(); if (!__guard.ok) return __guard.res;
-  try {
-    const pendingFolder = getOrCreateAITemplateSubFolder(AI_TEMPLATE_PENDING_FOLDER_NAME);
-    const fileName = 'template_' + predictedDocType + '_' + Utilities.getUuid() + '.png';
-    const file = pendingFolder.createFile(imageBlob.setName(fileName));
-    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    const driveFileId = file.getId();
-    const signature = computeLayoutSignature(imageBlob);
-    const clusterId = 'cluster_' + signature.slice(0, 8); // placeholder
-    const row = {
-      doc_type: null,              // Phase 2: doc_type = หมวดที่ User จัดให้ (ว่าง = ยังไม่จัด)
-      predicted_doc_type: predictedDocType,
-      drive_file_id: driveFileId,
-      drive_folder_path: 'AI_Templates/pending/',
-      ground_truth: aiResult || {},
-      layout_signature: signature,
-      cluster_id: clusterId,
-      status: 'pending',
-      created_by: senderEmail || ''
-    };
-    const url = getSupabaseUrl();
-    const key = getSupabaseKey();
-    const resp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/ai_templates', {
-      method: 'POST',
-      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      payload: JSON.stringify(row),
-      muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() >= 200 && resp.getResponseCode() < 300) {
-      const created = JSON.parse(resp.getContentText());
-      writeLog('✅ AI_TEMPLATE', 'Created candidate: ' + (created[0]?.id || 'unknown'));
-      return created[0];
-    }
-    throw new Error('Supabase insert failed: ' + resp.getContentText());
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'createTemplateCandidate error: ' + e.toString());
-    return null;
-  }
-}
+
 
 // ยืนยัน Template Candidate → Active (move file, build few-shot prompt)
-function confirmTemplate(templateId, groundTruth, docType, userEmail) {
-  // 🛡️ 2026-09-22 session guard: ยืนยันแม่แบบ AI (เขียน ai_templates + Drive)
-  const __guard = requireApiSession_(); if (!__guard.ok) return __guard.res;
-  try {
-    const url = getSupabaseUrl();
-    const key = getSupabaseKey();
-    // 1. อ่าน template เดิม
-    const getResp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/ai_templates?id=eq.' + templateId, {
-      method: 'GET', headers: { 'apikey': key, 'Authorization': 'Bearer ' + key }, muteHttpExceptions: true
-    });
-    if (getResp.getResponseCode() !== 200) throw new Error('Template not found');
-    const templates = JSON.parse(getResp.getContentText());
-    if (!templates.length) throw new Error('Template not found');
-    const tmpl = templates[0];
-    // 2. ย้ายไฟล์ Drive pending -> active
-    const file = DriveApp.getFileById(tmpl.drive_file_id);
-    const activeFolder = getOrCreateAITemplateSubFolder(AI_TEMPLATE_ACTIVE_FOLDER_NAME);
-    const pendingFolder = getOrCreateAITemplateSubFolder(AI_TEMPLATE_PENDING_FOLDER_NAME);
-    // DriveApp ไม่มี moveTo ตรง ๆ → makeCopy + trash
-    const newFile = file.makeCopy(activeFolder);
-    file.setTrashed(true);
-    newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    const newDriveFileId = newFile.getId();
-    // 3. สร้าง few_shot_prompt
-    const fewShotPrompt = buildFewShotPrompt(groundTruth, docType);
-    // 4. อัปเดต Supabase
-    const updatePayload = {
-      ground_truth: groundTruth,
-      few_shot_prompt: fewShotPrompt,
-      drive_file_id: newDriveFileId,
-      drive_folder_path: 'AI_Templates/active/',
-      status: 'active',
-      updated_at: new Date().toISOString()
-    };
-    const updResp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/ai_templates?id=eq.' + templateId, {
-      method: 'PATCH',
-      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      payload: JSON.stringify(updatePayload),
-      muteHttpExceptions: true
-    });
-    if (updResp.getResponseCode() >= 200 && updResp.getResponseCode() < 300) {
-      writeLog('✅ AI_TEMPLATE', 'Confirmed template: ' + templateId);
-      return JSON.parse(updResp.getContentText())[0];
-    }
-    throw new Error('Supabase update failed: ' + updResp.getContentText());
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'confirmTemplate error: ' + e.toString());
-    return null;
-  }
-}
+
 
 // สร้าง few-shot block สำหรับ inject เข้า prompt
-function buildFewShotPrompt(groundTruth, docType) {
-  if (!groundTruth || Object.keys(groundTruth).length === 0) return '';
-  const jsonStr = JSON.stringify(groundTruth, null, 2);
-  return `=== ตัวอย่าง ${docType} (แม่แบบอ้างอิง) ===\nคำตอบที่ถูกต้อง:\n${jsonStr}\n`;
-}
+
 
 // อ่าน AI Templates สำหรับ UI (รองรับ filter status, doc_type, pagination)
-function getAITemplates(filters) {
-  try {
-    const url = getSupabaseUrl();
-    const key = getSupabaseKey();
-    if (!url || !key) return { success: false, message: 'Supabase not configured' };
-    filters = filters || {};
-    const params = new URLSearchParams();
-    params.set('select', 'id,doc_type,drive_file_id,drive_folder_path,ground_truth,few_shot_prompt,layout_signature,cluster_id,status,usage_count,created_by,created_at,updated_at');
-    if (filters.status) params.set('status', 'eq.' + filters.status);
-    if (filters.doc_type) params.set('doc_type', 'eq.' + filters.doc_type);
-    params.set('order', 'created_at.desc');
-    params.set('limit', String(filters.limit || 50));
-    params.set('offset', String(filters.offset || 0));
-    const resp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/ai_templates?' + params, {
-      method: 'GET', headers: { 'apikey': key, 'Authorization': 'Bearer ' + key }, muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() === 200) {
-      const data = JSON.parse(resp.getContentText());
-      return { success: true, templates: data };
-    }
-    return { success: false, message: 'HTTP ' + resp.getResponseCode() };
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'getAITemplates error: ' + e.toString());
-    return { success: false, message: e.toString() };
-  }
-}
+
 
 // Soft delete / archive template
-function deleteTemplate(templateId) {
-  // 🛡️ 2026-09-22 session guard: ลบแม่แบบ AI (เขียน ai_templates)
-  const __guard = requireApiSession_(); if (!__guard.ok) return __guard.res;
-  try {
-    const url = getSupabaseUrl();
-    const key = getSupabaseKey();
-    const payload = { status: 'archived', updated_at: new Date().toISOString() };
-    const resp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/ai_templates?id=eq.' + templateId, {
-      method: 'PATCH',
-      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-    return resp.getResponseCode() >= 200 && resp.getResponseCode() < 300;
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'deleteTemplate error: ' + e.toString());
-    return false;
-  }
-}
 
-// เพิ่ม usage_count เมื่อ template ถูกใช้ match (PostgREST ไม่รองรับ ++ ตรง ๆ → ใช้ RPC increment_template_usage)
-function incrementTemplateUsage(templateId) {
-  try {
-    const url = getSupabaseUrl();
-    const key = getSupabaseKey();
-    if (!url || !key || !templateId) return false;
-    const resp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/rpc/increment_template_usage', {
-      method: 'POST',
-      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-      payload: JSON.stringify({ template_id: templateId }),
-      muteHttpExceptions: true
-    });
-    return resp.getResponseCode() >= 200 && resp.getResponseCode() < 300;
-  } catch (e) { return false; }
-}
+
+
 
 // ==========================================
 // AI PROMPT SETS (Phase 2) — ชุด prompt AI ต่อประเภท "AI เป็นคนเขียนเอง"
@@ -2414,6 +2345,7 @@ function buildStandardFieldConfig(kb) {
     fields.requester = true; fields.pay_approver = true;
   }
   if (kb.type === 'ใบส่งของ') { fields.po_number = true; fields.ref_no = true; }
+  if (kb.type === 'ใบส่งของ/ใบแจ้งหนี้') { fields.po_number = true; fields.ref_no = true; fields.tax_invoice_no = false; }
   if (kb.type === 'ใบวางบิล/ใบแจ้งหนี้') { fields.tax_invoice_no = true; fields.po_number = true; fields.ref_no = true; }
   if (kb.type === 'ใบชั่ง') {
     fields.vehicle_registration = true; fields.scale_weight_in = true;
@@ -2438,6 +2370,7 @@ function buildStandardPromptText(kb) {
   if (kb.type === 'ใบกำกับภาษี') focus = 'ตรวจคำว่าใบกำกับภาษี เลขที่ใบกำกับภาษี เลขผู้เสียภาษี VAT 7% ยอดก่อน VAT VAT และยอดรวมสุทธิ แยก tax_invoice_no จาก doc_no ให้ถูกต้อง';
   if (kb.type === 'ใบเสร็จรับเงิน') focus = 'ตรวจหลักฐานการรับเงิน เลขที่ใบเสร็จ วันที่ ร้านค้า รายการ และยอดที่รับชำระ ห้ามตีความใบเสนอราคาหรือใบส่งของเป็นใบเสร็จ';
   if (kb.type === 'ใบส่งของ') focus = 'เน้นเลขที่ใบส่งของ เลข PO วันที่ รายการสินค้า ปริมาณ หน่วย และผู้รับของ ยอดเงินเป็นข้อมูลรองและห้ามสร้างยอดถ้าไม่เห็นบนใบ';
+  if (kb.type === 'ใบส่งของ/ใบแจ้งหนี้') focus = 'เน้นเลขที่เอกสาร เลข PO รายการส่งมอบ ปริมาณ หน่วย และยอดเรียกเก็บตามใบ ห้ามถือเป็นใบกำกับภาษีหรือหลักฐานรับเงิน และห้ามสร้างยอดถ้าไม่เห็นบนใบ';
   if (kb.type === 'ใบสั่งซื้อ') focus = 'เน้น PO number ชื่อบริษัทผู้ซื้อ ร้านค้าผู้ขาย งาน/โครงการ ผู้เบิก ผู้สั่งจ่าย รายการ จำนวน ราคา และยอดตามใบสั่งซื้อ';
   if (kb.type === 'ใบวางบิล/ใบแจ้งหนี้') focus = 'เน้นเลขที่ใบวางบิล/ใบแจ้งหนี้ เลขอ้างอิง PO งวดงาน ยอดเรียกเก็บ ร้านค้า และเอกสารประกอบ ห้ามถือเป็นหลักฐานรับเงิน';
   if (kb.type === 'ใบชั่ง') focus = 'เน้นทะเบียนรถ น้ำหนักเข้า น้ำหนักออก น้ำหนักสุทธิ และหน่วยตัน ห้ามคำนวณน้ำหนักสุทธิเอง และไม่บังคับยอดเงิน';
@@ -2460,8 +2393,11 @@ function ensureStandardPromptSet(docType) {
     method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
   });
   if (resp.getResponseCode() === 200) {
-    var existing = JSON.parse(resp.getContentText());
-    if (Array.isArray(existing) && existing.length) {
+    // 🛡️ body ว่าง/ตัดครึ่ง (เช่น timeout) ต้องไม่พังทั้งรอบ — ถือว่าไม่พบของเดิมแล้วข้ามไปสร้าง
+    var existing = null;
+    try { existing = resp.getContentText() ? JSON.parse(resp.getContentText()) : null; } catch (parseErr) { existing = null; }
+    if (!Array.isArray(existing)) existing = [];
+    if (existing.length) {
       var current = existing[0];
       if (Number(current.prompt_seed_version || 0) < 3) {
         var migrated = {
@@ -2500,8 +2436,10 @@ function ensureStandardPromptSet(docType) {
     method: 'POST', headers: supabaseAuthHeaders(), payload: JSON.stringify(row), muteHttpExceptions: true
   });
   if (ins.getResponseCode() >= 200 && ins.getResponseCode() < 300) {
-    var arr = JSON.parse(ins.getContentText());
-    return Array.isArray(arr) && arr.length ? arr[0] : null;
+    var arr = null;
+    try { arr = ins.getContentText() ? JSON.parse(ins.getContentText()) : null; } catch (parseErr) { arr = null; }
+    if (Array.isArray(arr) && arr.length) return arr[0];
+    throw new Error('สร้างชุดมาตรฐาน [' + docType + '] สำเร็จแต่ตอบกลับไม่ใช่ JSON ที่อ่านได้: ' + ins.getContentText().substring(0, 200));
   }
   throw new Error('สร้างชุดมาตรฐาน [' + docType + '] HTTP ' + ins.getResponseCode() + ': ' + ins.getContentText().substring(0, 300));
 }
@@ -2513,8 +2451,13 @@ function ensureStandardPromptSets() {
   try {
     var created = 0;
     DOC_KNOWLEDGE_BASE.forEach(function (kb) {
-      var pr = ensureStandardPromptSet(kb.type);
-      if (pr && pr.id) created++; // ถ้าเพิ่งสร้าง (id มี) นับเพิ่ม — ของเดิม (มี id) ไม่นับซ้ำ
+      try {
+        var pr = ensureStandardPromptSet(kb.type);
+        if (pr && pr.id) created++; // ถ้าเพิ่งสร้าง (id มี) นับเพิ่ม — ของเดิม (มี id) ไม่นับซ้ำ
+      } catch (kbErr) {
+        // 🛡️ หมวดไหนพังข้ามหมวดนั้น — ไม่ลากทั้ง 17 หมวดตายด้วย (เดิม throw หลุด forEach ทั้งก้อน)
+        writeLog('⚠️ AI_TEMPLATE', 'ensureStandardPromptSet [' + kb.type + '] ข้าม: ' + kbErr.toString());
+      }
     });
     writeLog('🤖 PROMPT-SET', 'ensureStandardPromptSets: ตรวจ/สร้างครบ ' + DOC_KNOWLEDGE_BASE.length + ' หมวด (สำเร็จ ' + created + ' ใหม่)');
     return { success: true, created: created };
@@ -2538,7 +2481,8 @@ function getAIPrompts() {
       method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
     });
     if (resp.getResponseCode() !== 200) return { success: false, message: 'HTTP ' + resp.getResponseCode() + ' — ตรวจว่าวิ่ง supabase_setup_all.sql แล้ว (view v_ai_prompts_ui)' };
-    var prompts = JSON.parse(resp.getContentText());
+    var prompts = null;
+    try { prompts = resp.getContentText() ? JSON.parse(resp.getContentText()) : null; } catch (parseErr) { prompts = null; }
     if (!Array.isArray(prompts)) prompts = [];
     // ชุดมาตรฐานสำรอง: ถ้า DB ยังไม่มีหมวดไหนเลย → สร้างเป็นการ์ดในตัว (id=null, builtin=true)
     // ตอนลากภาพวาง การ์ดตัวนี้จะ trigger ensureStandardPromptSet ให้สร้างแถวจริงอัตโนมัติ
@@ -2570,219 +2514,11 @@ function getAIPrompts() {
   }
 }
 
-// 3) อ่านตัวอย่างบิลทุกใบ (สำหรับแท็บ "ตัวอย่าง" ในหน้า UI)
-function dedupeSampleRows(list) {
-  var rows = Array.isArray(list) ? list.slice() : [];
-  var seen = {};
-  var out = [];
-  for (var i = 0; i < rows.length; i++) {
-    var row = rows[i] || {};
-    var key = String(row.layout_signature || row.cluster_id || row.drive_file_id || row.id || '').trim();
-    if (!key) {
-      out.push(row);
-      continue;
-    }
-    if (seen[key]) continue;
-    seen[key] = true;
-    out.push(row);
-  }
-  return out;
-}
 
-function getAISamples(filters) {
-  try {
-    filters = filters || {};
-    var limit = Math.min(Math.max(Number(filters.limit || 200), 1), 1000);
-    // 1) คลังแม่แบบ/ตัวอย่างที่จัดการแล้ว (ai_templates — ทุกสถานะที่ยังไม่เก็บถาวร)
-    var tResp = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?status=neq.archived&select=id,doc_type,predicted_doc_type,drive_file_id,ground_truth,layout_signature,cluster_id,status,usage_count,source,created_by,created_at&order=created_at.desc&limit=' + limit, {
-      method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-    });
-    var tRows = (tResp.getResponseCode() === 200) ? JSON.parse(tResp.getContentText()) : [];
-    if (tResp.getResponseCode() !== 200) writeLog('⚠️ AI_SAMPLES', 'อ่าน ai_templates พลาด: HTTP ' + tResp.getResponseCode() + ': ' + tResp.getContentText().substring(0, 300));
-    if (!Array.isArray(tRows)) tRows = [];
 
-    // 🧠 v3.12.1: ดึง "บิลจริงจากตาราง receipts เสมอ" (ไม่ใช่เฉพาะตอนคลังแม่แบบว่าง)
-    // พยายาม select คอลัมน์เต็มก่อน ถ้า schema ไม่ตรง (HTTP 400) ค่อยย่อเป็นคอลัมน์ขั้นต่ำ — ไม่เดา และมีรายงาน diagnostics
-    var rRows = [];
-    var rErr = '';
-    try {
-      var rColsFull = 'doc_key,doc_type,store_name,image_url,google_drive_file_id,date,created_at,doc_no,total_amount,ref_no,company_name,job_name,requester,pay_approver,scale_weight_in,scale_weight_out,scale_weight_net,vehicle_registration';
-      var rResp = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/receipts?select=' + encodeURIComponent(rColsFull) + '&order=created_at.desc&limit=' + limit, {
-        method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-      });
-      if (rResp.getResponseCode() === 200) {
-        rRows = JSON.parse(rResp.getContentText()) || [];
-      } else {
-        rErr = 'full HTTP ' + rResp.getResponseCode();
-        var rResp2 = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/receipts?select=doc_key,doc_type,store_name,image_url,google_drive_file_id,date,created_at&order=created_at.desc&limit=' + limit, {
-          method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-        });
-        if (rResp2.getResponseCode() === 200) {
-          rRows = JSON.parse(rResp2.getContentText()) || [];
-          rErr = '';
-        } else {
-          rErr += ' | minimal HTTP ' + rResp2.getResponseCode() + ': ' + rResp2.getContentText().substring(0, 200);
-        }
-      }
-    } catch (eR) { rErr = eR.toString(); }
-    if (!Array.isArray(rRows)) rRows = [];
 
-    // 2) รวม 2 แหล่ง: บิลจริงเป็นตัวหลัก — ตัดแม่แบบ/candidate ที่เป็นสำเนาของบิลเดียวกันออก (ground_truth.doc_key ตรงกับ receipts)
-    var receiptKeys = {};
-    var receiptByDrive = {};
-    rRows.forEach(function (r) {
-      if (r && r.doc_key) receiptKeys[String(r.doc_key)] = true;
-      if (r && r.google_drive_file_id) receiptByDrive[String(r.google_drive_file_id)] = true;
-    });
-    var tplKept = [];
-    tRows.forEach(function (t) {
-      if (!t) return;
-      var gt = t.ground_truth || {};
-      var gtKey = String(gt.doc_key || '').trim();
-      if (gtKey && receiptKeys[gtKey]) return; // มีบิลต้นฉบับอยู่แล้ว → แสดงบิลจริงอย่างเดียว
-      if (t.drive_file_id && receiptByDrive[String(t.drive_file_id)]) return;
-      tplKept.push(t);
-    });
 
-    // 3) แปลงบิลจริงเป็นตัวอย่าง (id = doc_key จริง — ห้ามสุ่ม เพื่อให้บันทึกการจัดหมวดกลับถูกแถว)
-    var samples = tplKept.concat(rRows.map(function (r) {
-      var driveId = String(r.google_drive_file_id || '').trim();
-      if (!driveId && r.image_url) driveId = extractDriveFileId(String(r.image_url || ''));
-      var gt = {
-        doc_type: r.doc_type || '', store_name: r.store_name || '', date: r.date || '',
-        doc_no: r.doc_no || '', ref_no: r.ref_no || '', total_amount: r.total_amount || '',
-        company_name: r.company_name || '', job_name: r.job_name || '', requester: r.requester || '',
-        pay_approver: r.pay_approver || '', scale_weight_in: r.scale_weight_in || '',
-        scale_weight_out: r.scale_weight_out || '', scale_weight_net: r.scale_weight_net || '',
-        vehicle_registration: r.vehicle_registration || '', doc_key: r.doc_key || ''
-      };
-      return {
-        id: String(r.doc_key || r.created_at || ''),
-        source: 'receipt_archive',
-        status: r.doc_type ? 'active' : 'pending',
-        doc_type: r.doc_type || '',
-        predicted_doc_type: r.doc_type || '',
-        store_name: r.store_name || '',
-        date: r.date || r.created_at || '',
-        drive_file_id: driveId,
-        image_url: r.image_url || '',
-        ground_truth: gt,
-        created_at: r.created_at || ''
-      };
-    })).filter(function (s) { return !!String(s.drive_file_id || '').trim(); });
 
-    samples = dedupeSampleRows(samples);
-    writeLog('🧠 AI_SAMPLES', 'คืน ' + samples.length + ' ตัวอย่าง (templates=' + tRows.length + '/kept=' + tplKept.length + ', receipts=' + rRows.length + (rErr ? ', ERR=' + rErr : '') + ')');
-    return {
-      success: true,
-      samples: samples,
-      total: samples.length,
-      diagnostics: {
-        templates_in_db: tRows.length, templates_shown: tplKept.length,
-        receipts_in_db: rRows.length, receipts_shown: samples.length - tplKept.length,
-        receipts_query_error: rErr,
-        note: 'บิลที่ไม่มีรูปใน Drive (google_drive_file_id ว่าง) แสดงภาพไม่ได้จึงถูกซ่อน — ดูจำนวนจริงใน diagnostics'
-      }
-    };
-  } catch (e) {
-    writeLog('❌ AI_SAMPLES', 'getAISamples error: ' + e.toString());
-    return { success: false, message: e.toString(), samples: [] };
-  }
-}
-
-function updateAISampleClassification(payload) {
-  // 🛡️ 2026-09-22 session guard: จัดหมวดตัวอย่างบิลให้ AI
-  const __guard = requireApiSession_(payload); if (!__guard.ok) return __guard.res;
-  try {
-    payload = payload || {};
-    var docType = String(payload.docType || '').trim();
-    var sampleId = String(payload.sampleId || '').trim();
-    var docKey = String(payload.docKey || payload.doc_key || '').trim();
-    var gtIn = payload.groundTruth || {};
-    var targetDocKey = docKey || String(gtIn.doc_key || '').trim();
-    if (!docType) return { success: false, message: 'กรุณาเลือกประเภทเอกสารก่อนบันทึก' };
-
-    // 🧠 v3.12.1: นับ "แถวที่โดนแก้จริง" ด้วย Prefer: return=representation — PostgREST คืน HTTP 200 + [] (0 แถว)
-    // เมื่อ id ไม่ตรง แบบเดิมจึง ok=true ปลอม แล้วข้ามการแก้ receipts → การจัดหมวดหายเงียบ ๆ
-    function patchCount(path, body) {
-      var r = UrlFetchApp.fetch(supabaseBase() + path, {
-        method: 'PATCH', headers: { 'apikey': getSupabaseKey(), 'Authorization': 'Bearer ' + getSupabaseKey(), 'Prefer': 'return=representation' },
-        payload: JSON.stringify(body), muteHttpExceptions: true
-      });
-      var code = r.getResponseCode();
-      if (code < 200 || code >= 300) return { rows: 0, data: [], error: 'HTTP ' + code + ': ' + r.getContentText().substring(0, 300) };
-      var arr = [];
-      try { arr = JSON.parse(r.getContentText()) || []; } catch (eP) { arr = []; }
-      return { rows: Array.isArray(arr) ? arr.length : 0, data: Array.isArray(arr) ? arr : [] };
-    }
-
-    var out = { success: false, template_rows: 0, receipt_rows: 0, created_template: false, doc_type: docType, message: '' };
-    var gtT = JSON.parse(JSON.stringify(gtIn || {}));
-    gtT.doc_type = docType;
-    if (targetDocKey) gtT.doc_key = gtT.doc_key || targetDocKey;
-
-    // 1) แก้แถว ai_templates ตาม id (ตัวอย่างจากคลังแม่แบบ/candidate) — รวม ground_truth ที่ User ตรวจแล้ว
-    if (sampleId) {
-      var tplRes = patchCount('/rest/v1/ai_templates?id=eq.' + encodeURIComponent(sampleId), {
-        doc_type: docType, predicted_doc_type: docType, status: 'active', ground_truth: gtT
-      });
-      out.template_rows = tplRes.rows;
-      if (tplRes.error) writeLog('⚠️ AI_REVIEW', 'patch ai_templates พลาด: ' + tplRes.error);
-    }
-
-    // 2) แก้บิลจริงใน receipts ตาม doc_key (receipts ไม่มีคอลัมน์ predicted_doc_type — แก้เฉพาะ doc_type)
-    if (targetDocKey) {
-      var rcRes = patchCount('/rest/v1/receipts?doc_key=eq.' + encodeURIComponent(targetDocKey), { doc_type: docType });
-      out.receipt_rows = rcRes.rows;
-      if (rcRes.error) writeLog('⚠️ AI_REVIEW', 'patch receipts พลาด: ' + rcRes.error);
-    }
-
-    // 3) หัวใจ: ถ้ายังไม่มีแม่แบบ active ผูกกับบิลใบนี้ → สร้างให้อัตโนมัติ
-    //    ไม่งั้น resolvePromptInjection หา few-shot ไม่เจอ → analyzeReceiptSmart ข้ามรอบ 2 → AI อ่านด้วยความรู้ทั่วไป (อ่านมั่ว)
-    if (out.template_rows === 0 && targetDocKey) {
-      var sig = 'receipt:' + targetDocKey;
-      var find = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?layout_signature=eq.' + encodeURIComponent(sig) + '&select=id&limit=1', {
-        method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-      });
-      var found = (find.getResponseCode() === 200) ? JSON.parse(find.getContentText()) : [];
-      if (Array.isArray(found) && found.length) {
-        var upd = patchCount('/rest/v1/ai_templates?id=eq.' + encodeURIComponent(found[0].id), {
-          doc_type: docType, predicted_doc_type: docType, status: 'active', ground_truth: gtT
-        });
-        out.template_rows += upd.rows;
-      } else {
-        var driveId = '';
-        if (out.receipt_rows > 0 && rcRes.data.length) driveId = String(rcRes.data[0].google_drive_file_id || '').trim();
-        if (driveId) {
-          var ins = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates', {
-            method: 'POST', headers: { 'apikey': getSupabaseKey(), 'Authorization': 'Bearer ' + getSupabaseKey(), 'Prefer': 'return=representation' },
-            payload: JSON.stringify({
-              doc_type: docType, predicted_doc_type: docType, status: 'active',
-              drive_file_id: driveId, layout_signature: sig, cluster_id: targetDocKey,
-              ground_truth: gtT, source: 'receipt_review', created_by: 'review_board'
-            }),
-            muteHttpExceptions: true
-          });
-          var insCode = ins.getResponseCode();
-          if (insCode >= 200 && insCode < 300) { out.created_template = true; out.template_rows += 1; }
-          else writeLog('⚠️ AI_REVIEW', 'insert ai_templates พลาด: HTTP ' + insCode + ': ' + ins.getContentText().substring(0, 300));
-        }
-      }
-    }
-
-    out.success = (out.template_rows > 0) || (out.receipt_rows > 0);
-    if (!out.success) {
-      out.message = 'บันทึกไม่สำเร็จ — ไม่พบแถวที่ตรงในฐานข้อมูล (sampleId=' + (sampleId || '-') + ', docKey=' + (targetDocKey || '-') + ')';
-    } else {
-      out.message = 'บันทึกแล้ว' + (out.receipt_rows ? ' • บิลจริง ' + out.receipt_rows + ' แถว' : '') + (out.template_rows ? ' • แม่แบบ AI ' + out.template_rows + ' แถว' : '') + (out.created_template ? ' (สร้างแม่แบบให้ AI ใช้บิลนี้เป็นตัวอย่าง)' : '');
-    }
-    writeLog('🧠 AI_REVIEW', 'จัดหมวด "' + docType + '" → ' + out.message + (targetDocKey ? ' (doc_key=' + targetDocKey + ')' : ''));
-    return out;
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'updateAISampleClassification error: ' + e.toString());
-    return { success: false, message: e.toString() };
-  }
-}
 
 // 4) สร้างชุด prompt ใหม่แบบ user กำหนดเอง (custom) — AI จะตั้งชื่อ/เขียน prompt ให้เมื่อมีตัวอย่างวางลง
 function createCustomPromptSet(title) {
@@ -2813,145 +2549,13 @@ function createCustomPromptSet(title) {
   }
 }
 
-// 5) นำตัวอย่าง (templateId) ไปวางในหมวด docType — อัปเดต ai_templates + นับตัวอย่าง
-//    ถ้าหมวดนี้ยังไม่มีชุด prompt ใน DB (เช่นกดจากการ์ดมาตรฐานสำรอง) → สร้างชุดมาตรฐานให้อัตโนมัติ
-//    คืนค่า needs_generate = true เมื่อหมวดนั้นเพิ่งมีตัวอย่างแรก หรือชุด prompt ยังไม่พร้อม
-// 🔎 วินิจฉัยระบบ "เอกสารสำหรับ AI" — รันจาก Apps Script editor (เลือกฟังก์ชันนี้แล้วกด Run)
-// แล้วคัดลอกผล JSON จาก Execution log ส่งกลับให้ AI วิเคราะห์ (ตามกฎข้อ 6 — ไม่เดาข้อมูล DB)
-function diagnoseAIDocuments() {
-  var report = { time: new Date().toISOString() };
-  function countOf(path) {
-    try {
-      var r = UrlFetchApp.fetch(supabaseBase() + path, {
-        method: 'get',
-        headers: { 'apikey': getSupabaseKey(), 'Authorization': 'Bearer ' + getSupabaseKey(), 'Prefer': 'count=exact', 'Range': '0-0' },
-        muteHttpExceptions: true
-      });
-      var cr = String(r.getHeaders()['Content-Range'] || r.getHeaders()['content-range'] || '');
-      var m = cr.match(/\/(\d+)$/);
-      return { http: r.getResponseCode(), total: m ? Number(m[1]) : null, error: (r.getResponseCode() >= 300 ? r.getContentText().substring(0, 200) : '') };
-    } catch (e) { return { http: 0, total: null, error: e.toString() }; }
-  }
-  report.ai_templates_total = countOf('/rest/v1/ai_templates?select=id');
-  report.ai_prompts_total = countOf('/rest/v1/ai_prompts?select=id');
-  report.receipts_total = countOf('/rest/v1/receipts?select=doc_key');
-  report.receipts_with_drive_image = countOf('/rest/v1/receipts?select=doc_key&google_drive_file_id=not.is.null');
-  report.receipts_classified = countOf('/rest/v1/receipts?select=doc_key&or=(doc_type.not.is.null,doc_type.neq.)');
-  try {
-    var dt = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?status=neq.archived&select=doc_type,predicted_doc_type,status&order=created_at.desc&limit=1000', { method: 'get', headers: supabaseAuthHeaders(), muteHttpExceptions: true });
-    var rows = (dt.getResponseCode() === 200) ? JSON.parse(dt.getContentText()) : [];
-    report.templates_by_status = {};
-    report.templates_by_type = {};
-    rows.forEach(function (r) {
-      var st = String(r.status || 'null');
-      report.templates_by_status[st] = (report.templates_by_status[st] || 0) + 1;
-      var ty = String(r.doc_type || r.predicted_doc_type || '(ยังไม่จัดประเภท)');
-      report.templates_by_type[ty] = (report.templates_by_type[ty] || 0) + 1;
-    });
-  } catch (e2) { report.templates_error = e2.toString(); }
-  try {
-    var pr = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?select=doc_type,status,sample_count&limit=1000', { method: 'get', headers: supabaseAuthHeaders(), muteHttpExceptions: true });
-    var prows = (pr.getResponseCode() === 200) ? JSON.parse(pr.getContentText()) : [];
-    report.prompts = (prows || []).map(function (x) { return { doc_type: x.doc_type, status: x.status, sample_count: x.sample_count }; });
-  } catch (e3) { report.prompts_error = e3.toString(); }
-  var txt = '📊 AI_DOCUMENTS_DIAGNOSTIC\n' + JSON.stringify(report, null, 2);
-  Logger.log(txt);
-  try { SpreadsheetApp.getActive().toast('เปิด Execution log (Ctrl+Enter) แล้วคัดลอกผล JSON ส่งกลับให้ AI วิเคราะห์'); } catch (e4) {}
-  return report;
-}
 
-function attachTemplateToPrompt(templateId, docType) {
-  // 🛡️ 2026-09-22 session guard: ผูกตัวอย่างบิลเข้ากับชุด prompt (เรียกภายในจาก uploadLocalSample ผ่าน runAsInternal_)
-  const __guard = requireApiSession_(); if (!__guard.ok) return __guard.res;
-  try {
-    var reads = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?doc_type=eq.' + encodeURIComponent(docType) + '&select=id,status', {
-      method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-    });
-    var promptList = (reads.getResponseCode() === 200) ? JSON.parse(reads.getContentText()) : [];
-    var pr = (Array.isArray(promptList) && promptList.length) ? promptList[0] : null;
-    if (!pr) {
-      pr = ensureStandardPromptSet(docType); // การ์ดสำรอง/หมวดมาตรฐาน → สร้างแถวให้อัตโนมัติ
-      if (!pr) return { success: false, message: 'ไม่พบชุด prompt หมวด "' + docType + '" — สร้างชุดก่อนแล้วลากใหม่' };
-    }
 
-    var upd = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?id=eq.' + templateId, {
-      method: 'PATCH',
-      headers: supabaseAuthHeaders(),
-      payload: JSON.stringify({ doc_type: docType, status: 'active' }),
-      muteHttpExceptions: true
-    });
-    if (upd.getResponseCode() < 200 || upd.getResponseCode() >= 300) {
-      return { success: false, message: 'จัดตัวอย่างไม่สำเร็จ HTTP ' + upd.getResponseCode() };
-    }
-    // นับตัวอย่างจริง (ไม่รวม archived)
-    var cnt = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?doc_type=eq.' + encodeURIComponent(docType) + '&status=neq.archived&select=id', {
-      method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-    });
-    var samples = (cnt.getResponseCode() === 200) ? JSON.parse(cnt.getContentText()) : [];
-    var n = (Array.isArray(samples) ? samples.length : 0);
-    UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?id=eq.' + pr.id, {
-      method: 'PATCH', headers: supabaseAuthHeaders(),
-      payload: JSON.stringify({ sample_count: n, status: pr.status === 'ready' ? 'ready' : 'sample_needed' }),
-      muteHttpExceptions: true
-    });
-    var needsGenerate = (n >= 1 && pr.status !== 'ready');
-    return { success: true, sample_count: n, needs_generate: needsGenerate };
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'attachTemplateToPrompt error: ' + e.toString());
-    return { success: false, message: e.toString() };
-  }
-}
+
 
 // 6) อัปโหลดรูปจากเครื่อง (ลากวางบนหมวด) → เอาเข้าบัญชีตัวอย่าง + จัดหมวดทันที
 //    blobBase64 + mime + docType (หมวดที่วาง) — AI อ่าน ground truth เบื้องต้นให้
-function uploadLocalSample(docType, fileName, blobBase64, mime) {
-  // 🛡️ 2026-09-22 session guard: อัปโหลดไฟล์ตัวอย่างเข้า Drive + ให้ AI อ่าน (กินโควตา Gemini)
-  const __guard = requireApiSession_(); if (!__guard.ok) return __guard.res;
-  try {
-    var bytes = Utilities.base64Decode(String(blobBase64 || ''));
-    if (!bytes || !bytes.length) return { success: false, message: 'ไฟล์ว่าง/อ่าน base64 ไม่ได้' };
-    var blob = Utilities.newBlob(bytes, mime || 'image/jpeg', fileName || 'upload_sample.png');
-    var pendingFolder = getOrCreateAITemplateSubFolder(AI_TEMPLATE_PENDING_FOLDER_NAME);
-    var file = pendingFolder.createFile(blob);
-    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    var gv = {};
-    if (docType) {
-      try {
-        var ai = analyzeReceiptSmart(blob);  // อ่านเพื่อ ground truth เบื้องต้น (ไม่เดา)
-        if (ai) { normalizeReceiptDocFields(ai); gv = ai; }
-      } catch (e) { gv = {}; }
-    }
-    var row = {
-      doc_type: docType || null,
-      predicted_doc_type: gv.doc_type || null,
-      drive_file_id: file.getId(),
-      drive_folder_path: 'AI_Templates/pending/',
-      ground_truth: gv,
-      layout_signature: computeLayoutSignature(blob),
-      cluster_id: 'upload_' + Utilities.getUuid().slice(0, 8),
-      status: docType ? 'active' : 'pending',
-      source: 'user_upload',
-      created_by: 'web'
-    };
-    var ins = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates', {
-      method: 'POST', headers: supabaseAuthHeaders(), payload: JSON.stringify(row), muteHttpExceptions: true
-    });
-    if (ins.getResponseCode() < 200 || ins.getResponseCode() >= 300) {
-      return { success: false, message: 'บันทึกตัวอย่างไม่สำเร็จ HTTP ' + ins.getResponseCode() };
-    }
-    var created = JSON.parse(ins.getContentText())[0];
-    // ถ้ามีหมวด → นับ + อยากให้ AI เขียน prompt ต่อ (ถ้ายังไม่พร้อม)
-    var wantsGenerate = false;
-    if (docType) {
-      var attachRes = runAsInternal_(function () { return attachTemplateToPrompt(created.id, docType); }); // 🛡️ internal call
-      wantsGenerate = !!(attachRes && attachRes.needs_generate);
-    }
-    return { success: true, sample: created, needs_generate: wantsGenerate };
-  } catch (e) {
-    writeLog('❌ AI_TEMPLATE', 'uploadLocalSample error: ' + e.toString());
-    return { success: false, message: e.toString() };
-  }
-}
+
 
 // 7) AI เขียน/ปรับชุด prompt ของหมวด — ดูความรู้บัญชีฐาน + ตัวอย่างสูงสุด 3 ใบ → เขียน prompt เอง
 function generateAIPrompt(docType) {
@@ -2968,33 +2572,17 @@ function generateAIPrompt(docType) {
       if (!pr) return { success: false, message: 'ไม่พบชุด prompt หมวด "' + docType + '"' };
     }
 
-    // ดึงตัวอย่างสูงสุด 3 ใบ (มี ground_truth)
-    var samples = [];
-    if (pr.sample_count > 0) {
-      var sResp = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?doc_type=eq.' + encodeURIComponent(docType) + '&status=neq.archived&select=drive_file_id,ground_truth,created_at&limit=3&order=created_at.desc', {
-        method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-      });
-      if (sResp.getResponseCode() === 200) {
-        samples = JSON.parse(sResp.getContentText());
-      }
-    }
     // กันกดซ้ำ (lock ระหว่าง generate)
     UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?id=eq.' + pr.id, {
       method: 'PATCH', headers: supabaseAuthHeaders(),
       payload: JSON.stringify({ status: 'generating' }), muteHttpExceptions: true
     });
 
-    // สร้าง meta-prompt ให้ Gemini "เขียน prompt เอง" (ภาษาที่ AI เข้าใจ)
+    // สร้าง meta-prompt ให้ Gemini "เขียน prompt เอง" (ภาษาที่ AI เข้าใจ) — v3.16.0: ไม่มีตัวอย่างบิลแล้ว ใช้ความรู้หมวดอย่างเดียว
     var base = (pr.base_knowledge || '') + ' | ประเภทเอกสาร: ' + (pr.title || docType);
-    var samplesBlock = '';
-    for (var i = 0; i < samples.length; i++) {
-      samplesBlock += '--- ตัวอย่างที่ ' + (i + 1) + ' ---\n' +
-        'คำตอบที่ถูกต้อง (ground truth):\n' + JSON.stringify(samples[i].ground_truth || {}, null, 2) + '\n';
-    }
     var metaPrompt = 'คุณเป็นผู้เชี่ยวชาญด้านการ "เขียน prompt" ให้ AI อ่านเอกสารบัญชี/บิลจัดซื้อสำหรับบริษัทก่อสร้างไทย\n' +
       'หน้าที่: เขียนชุด prompt อ่านบิลให้ละเอียด ใช้งานได้จริง ใช้ภาษาไทย ที่ AI รุ่นใหม่เข้าใจและบังคับไม่ให้เดาข้อมูล\n' +
       '\nข้อมูลหมวดของบิลนี้:\n' + base + '\n' +
-      (samplesBlock ? '\nตัวอย่างบิลจริง (ดูภาพประกอบ) + คำตอบที่ถูกต้อง:\n' + samplesBlock : '\n(ยังไม่มีตัวอย่าง — เขียน prompt จากความรู้หมวดนี้อย่างเดียว)\n') +
       '\nข้อกำหนดชุด prompt ที่ต้องครอบคลุม:\n' +
       '1. วิธีระบุฟิลด์ (doc_type, tax_invoice_no, book_no, doc_no, ref_no/ref_label, po_number, company_name, job_name, requester, pay_approver)\n' +
       '2. วิธีอ่านเลข/วัน/ยอดรวม (เฉพาะที่เห็นจริง ห้ามคำนวณ ห้ามเดา; ใบชั่งต้องอ่าน น้ำหนักเข้า/ออก/สุทธิ+ทะเบียน)\n' +
@@ -3004,14 +2592,6 @@ function generateAIPrompt(docType) {
       '\nตอบกลับเป็น JSON object นี้เท่านั้น: { "title": "ชื่อหมวดสั้นๆ", "prompt": "ชุด prompt ภาษาไทย ละเอียด สั่งอ่านบิลนี้", "notes": "ข้อสังเกตจากตัวอย่าง (ถ้ามี)" }';
 
     var parts = [{ "text": metaPrompt }];
-    for (var j = 0; j < samples.length; j++) {
-      var fid = samples[j].drive_file_id;
-      if (!fid) continue;
-      try {
-        var b = DriveApp.getFileById(fid).getBlob();
-        parts.push({ "inlineData": { "mimeType": b.getContentType() || "image/jpeg", "data": Utilities.base64Encode(b.getBytes()) } });
-      } catch (e) { /* ข้ามใบที่เปิดไฟล์ไม่ได้ */ }
-    }
 
     var result = callGeminiJson(parts, { retries: 3 });
     if (!result || !result.prompt) throw new Error('Gemini ไม่คืน prompt ที่ถูกต้อง');
@@ -3027,14 +2607,14 @@ function generateAIPrompt(docType) {
         prompt_text: promptText,
         status: 'ready',
         version: version,
-        sample_count: (samples.length || 0)
+        sample_count: 0
       }),
       muteHttpExceptions: true
     });
     if (upd.getResponseCode() < 200 || upd.getResponseCode() >= 300) {
       throw new Error('บันทึกชุด prompt ไม่สำเร็จ HTTP ' + upd.getResponseCode());
     }
-    writeLog('🤖 PROMPT-SET', 'AI เขียนชุด prompt [' + title + '] v' + version + ' จาก ' + samples.length + ' ตัวอย่าง');
+    writeLog('🤖 PROMPT-SET', 'AI เขียนชุด prompt [' + title + '] v' + version + ' (จากความรู้หมวด — ไม่มีตัวอย่างบิล)');
     return { success: true, version: version, title: title };
   } catch (e) {
     // ปลดล็อกสถานะ (กันค้าง generating)
@@ -3074,10 +2654,6 @@ function deletePromptSet(promptId) {
     var pr = (Array.isArray(plist) && plist.length) ? plist[0] : null;
     if (!pr) return { success: false, message: 'ไม่พบชุด prompt' };
     if (pr.kind === 'standard') return { success: false, message: 'ชุดมาตรฐานลบไม่ได้ (ซ่อนได้ในภายหลัง)' };
-    UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?doc_type=eq.' + encodeURIComponent(pr.doc_type), {
-      method: 'PATCH', headers: supabaseAuthHeaders(),
-      payload: JSON.stringify({ doc_type: null, status: 'pending' }), muteHttpExceptions: true
-    });
     UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?id=eq.' + promptId, {
       method: 'DELETE', headers: supabaseAuthHeaders(), muteHttpExceptions: true
     });
@@ -3087,31 +2663,151 @@ function deletePromptSet(promptId) {
   }
 }
 
-// 8) ดึงชุด prompt ที่พร้อมใช้ + ตัวอย่าง few-shot ของ docType (สำหรับฉีดเข้า analyzeReceiptSmart)
+// 8) ดึงชุด prompt ที่พร้อมใช้ของ docType (สำหรับฉีดเข้า analyzeReceiptSmart)
+//    (v3.16.0: ระบบตัวอย่าง/few-shot ถูกลบออก — เหลือเฉพาะ prompt_text)
 function resolvePromptInjection(docType) {
   try {
-    if (!docType) return { prompt_text: '', few_shot: '' };
+    if (!docType) return { prompt_text: '' };
     var reads = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?doc_type=eq.' + encodeURIComponent(docType) + '&status=eq.ready&select=prompt_text,title&limit=1', {
       method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
     });
     var plist = (reads.getResponseCode() === 200) ? JSON.parse(reads.getContentText()) : [];
     var pr = (Array.isArray(plist) && plist.length) ? plist[0] : null;
     var promptText = (pr && pr.prompt_text) ? pr.prompt_text : '';
-    var sResp = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?doc_type=eq.' + encodeURIComponent(docType) + '&status=neq.archived&select=ground_truth&limit=3&order=created_at.desc', {
-      method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-    });
-    var sList = (sResp.getResponseCode() === 200) ? JSON.parse(sResp.getContentText()) : [];
-    var fewShot = '';
-    if (Array.isArray(sList) && sList.length) {
-      fewShot = sList.map(function (s) {
-        return '=== ตัวอย่างบิลนี้ (อ้างอิง) ===\nคำตอบที่ถูกต้อง:\n' + JSON.stringify(s.ground_truth || {}, null, 2);
-      }).join('\n\n');
-    }
-    return { prompt_text: promptText, few_shot: fewShot };
+    return { prompt_text: promptText };
   } catch (e) {
-    writeLog('⚠️ AI_TEMPLATE', 'resolvePromptInjection error: ' + e.toString());
-    return { prompt_text: '', few_shot: '' };
+    writeLog('🧠 AI_TEMPLATE', 'resolvePromptInjection error: ' + e.toString());
+    return { prompt_text: '' };
   }
+}
+
+// 🎯 2026-09-23: CLASSIFICATION-FIRST — ระบุประเภทเอกสารจากภาพก่อน (ป้องกันอ่านมั่ว)
+// ใช้โปรมป์เฉพาะเจาะจง: เร็ว, โฟกัสแค่ประเภท, ไม่ต้องสกัดข้อมูลทั้งหมด
+function classifyDocumentType(imageBlob) {
+  const base64Image = Utilities.base64Encode(imageBlob.getBytes());
+  const mimeType = imageBlob.getContentType() || "image/jpeg";
+
+  let customTypesBlock = '';
+  try {
+    const customTypes = getCustomDocTypes().filter(t => t && t.name);
+    if (customTypes.length) {
+      customTypesBlock = '\n\nประเภทเอกสารเฉพาะขององค์กรนี้ (ถ้าหัวใบตรงกับชื่อนี้หรือคำที่อาจพิมพ์บนใบ ให้ real_name เป็นชื่อนั้นเป๊ะ ๆ):\n' +
+        customTypes.map(t => '• "' + t.name + '"' + (t.aliases && t.aliases.length ? ' (คำบนใบอาจพิมพ์ว่า: ' + t.aliases.join(', ') + ')' : '')).join('\n');
+    }
+  } catch (e) { /* ดึงประเภทองค์กรไม่ได้ — ใช้มาตรฐานล้วน */ }
+
+  const classifyPrompt = `ลำดับการตัดสิน (สำคัญ):
+1) อ่าน "ชื่อประเภทที่พิมพ์อยู่บนหัวใบจริง" ก่อนเสมอ — real_name = ชื่อที่เห็นบนใบเป๊ะ ๆ (หัวใบเขียนว่าอะไรคืออย่างนั้น แม้มียอดเงินด้วยก็ตาม) แล้วเลือกรหัสที่ตรงที่สุด
+2) ถ้าหัวใบไม่มีชื่อประเภทชัดเจน (title_seen=false) จึงใช้ลักษณะ/โครงสร้างของเอกสารตามเกณฑ์รหัสประกอบการตัดสิน
+3) ยังไม่แน่ใจจริง ๆ → UNKNOWN + confidence ต่ำ ห้ามเดา
+
+คุณคือระบบจำแนกประเภทเอกสารธุรกิจไทย ดูภาพแล้วตอบ JSON คำเดียว ห้ามมีข้อความอื่น:
+{
+  "document_type": "รหัส 1 ค่า จากรายการเกณฑ์ด้านล่าง (ถ้าแน่ใจ) หรือ UNKNOWN",
+  "real_name": "ชื่อประเภทที่พิมพ์จริงบนหัวใบ เช่น ใบกำกับภาษี/ใบส่งของ/ใบชั่ง (ถ้าหัวใบไม่มีชื่อประเภทให้ใส่ -)",
+  "title_seen": true ถ้าเห็นชื่อประเภทพิมพ์ชัดเจนบนใบ / false ถ้าไม่มี,
+  "confidence": 0-100,
+  "reason": "เหตุผลสั้นๆ 1 ประโยคว่าทำไมจึงเป็นประเภทนี้"
+}
+
+เกณฑ์:
+- INVOICE_TAX_INVOICE: ใบกำกับภาษี/ใบเสร็จรับเงิน (มีเลขประจำตัวผู้เสียภาษี, VAT, รวมภาษี)
+- RECEIPT: ใบเสร็จ/ใบกวิต्तธรรมดา (ไม่มี VAT แยก, แค่ยอดรวม)
+- PURCHASE_ORDER: ใบสั่งซื้อ/PO (มีคำว่า Purchase Order, PO No., รายการสั่งซื้อ)
+- DELIVERY_NOTE: ใบส่งของ/Delivery Note (มีคำว่า ส่งของ, Delivery, จำนวนส่ง, ลงชื่อรับ)
+- WEIGHBRIDGE: ใบชั่งน้ำหนัก (มี น้ำหนักสุทธิ/รวม/ทะเบียนรถ, Gross/Tare/Net)
+- CREDIT_NOTE: ใบลดหนี้/เครดิตโน้ต (มีคำว่า Credit Note, ลดหนี้, คืนเงิน)
+- DEBIT_NOTE: ใบเพิ่มหนี้/เดบิตโน้ต (มีคำว่า Debit Note, เพิ่มหนี้)
+- QUOTATION: ใบเสนอราคา (มีคำว่า Quotation, ราคา/ข้อเสนอ, ไม่ใช่เรียกเก็บเงิน)
+- INTERNAL_VOUCHER: ใบเบิก/ใบจ่าย/บัญชีภายใน (ไม่มีผู้ขายภายนอก, ใช้ภายในองค์กร)
+- INVOICE_BILLING: ใบวางบิล/ใบแจ้งหนี้ (วางบิล/แจ้งหนี้/Invoice เรียกเก็บเงิน)
+- WHT_CERT: หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)
+- RECEIPT_TAX_INVOICE: ใบเสร็จรับเงิน/ใบกำกับภาษี (ใบเดียวมีทั้งสองชื่อ)
+- DELIVERY_TAX_INVOICE: ใบส่งของ/ใบกำกับภาษี (ใบเดียวรวมทั้งสอง)
+- DELIVERY_INVOICE_BILLING: ใบส่งของ/ใบแจ้งหนี้ (ใบเดียวรวมทั้งสอง — ส่งมอบ+เรียกเก็บเงิน ไม่มีส่วน VAT)
+- WORK_ACCEPTANCE: ใบตรวจรับพัสดุ/งานจ้าง
+- PURCHASE_REQUISITION: ใบขอซื้อ/ใบขอเบิก (PR)
+- PAYMENT_VOUCHER: ใบสำคัญจ่าย (Payment Voucher)
+- RECEIVE_VOUCHER: ใบสำคัญรับ (Receive Voucher)
+- PETTY_CASH: ใบเบิกเงินสดย่อย (Petty Cash Voucher)
+- UNKNOWN: อ่านไม่ชัด/ไม่เข้าเกณฑ์ใดเลย
+
+สำคัญ: ห้ามเดา — ไม่แน่ใจให้ UNKNOWN + confidence ต่ำ${customTypesBlock}`;
+
+  const payload = {
+    contents: [{ parts: [{ text: classifyPrompt }, { inlineData: { mimeType, data: base64Image } }] }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 512 }
+  };
+  const options = { method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true, timeout: 20 };
+
+  const models = getPreferredGeminiModels();
+  for (let mi = 0; mi < models.length; mi++) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${models[mi]}:generateContent?key=${getGeminiKey()}`;
+    try {
+      const response = UrlFetchApp.fetch(url, options);
+      const body = JSON.parse(response.getContentText());
+      if (body.candidates && body.candidates[0] && body.candidates[0].content) {
+        const text = body.candidates[0].content.parts[0].text;
+        const parsed = JSON.parse(text);
+        const dt = String(parsed.document_type || 'UNKNOWN').trim();
+        const conf = Number(parsed.confidence) || 0;
+        if (dt && dt !== 'UNKNOWN' && conf >= 50) {
+          // ชื่อไทยตามมาตรฐานระบบ (DOC_KNOWLEDGE_BASE/doc_types) — ครอบคลุม 17 ประเภทมาตรฐาน
+          const typeMap = {
+            INVOICE_TAX_INVOICE: 'ใบกำกับภาษี', RECEIPT_TAX_INVOICE: 'ใบเสร็จรับเงิน/ใบกำกับภาษี',
+            RECEIPT: 'ใบเสร็จรับเงิน', DELIVERY_TAX_INVOICE: 'ใบส่งของ/ใบกำกับภาษี',
+            DELIVERY_INVOICE_BILLING: 'ใบส่งของ/ใบแจ้งหนี้',
+            DELIVERY_NOTE: 'ใบส่งของ', PURCHASE_ORDER: 'ใบสั่งซื้อ', INVOICE_BILLING: 'ใบวางบิล/ใบแจ้งหนี้',
+            WEIGHBRIDGE: 'ใบชั่ง', WHT_CERT: 'หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)',
+            CREDIT_NOTE: 'ใบลดหนี้', DEBIT_NOTE: 'ใบเพิ่มหนี้', WORK_ACCEPTANCE: 'ใบตรวจรับพัสดุ/งานจ้าง',
+            PURCHASE_REQUISITION: 'ใบขอซื้อ/ใบขอเบิก', QUOTATION: 'ใบเสนอราคา',
+            PAYMENT_VOUCHER: 'ใบสำคัญจ่าย', RECEIVE_VOUCHER: 'ใบสำคัญรับ', PETTY_CASH: 'ใบเบิกเงินสดย่อย',
+            INTERNAL_VOUCHER: 'ใบจ่าย/เบิก'
+          };
+          const mapped = typeMap[dt] || '';
+          const realName = String(parsed.real_name || '').trim();
+          const titleSeen = parsed.title_seen === true || String(parsed.title_seen || '').toLowerCase() === 'true';
+          // ชื่อประเภทบนใบจริงมาก่อนเสมอ (เทียบ normalizeDocType ตรงเป๊ะ/คำพ้องได้ทั้งมาตรฐาน+องค์กร) — ไม่มีชื่อบนใบค่อยใช้ชื่อจากแม่แบบความรู้
+          const docType = (titleSeen && realName && realName !== '-') ? realName : (mapped || 'อื่นๆ');
+          return { doc_type: docType, confidence: conf, universal_type: dt, title_seen: titleSeen, real_name: realName, mapped_type: mapped };
+        }
+      }
+    } catch (e) { /* try next model */ }
+  }
+  return { doc_type: 'ไม่ทราบ', confidence: 0, universal_type: 'UNKNOWN' };
+}
+
+// รับประกัน 3 ฟิลด์บังคับ (doc_type, date, doc_no) — หลักการ: ห้ามเดาทดแทนข้อมูลจริงบนบิล
+// ประเภทเอกสาร: ยึดที่อ่านจากภาพจริงเป็นหลัก (extract เอง → ขั้นจำแนกภาพ) — แม่แบบ/ค่าเริ่มต้นเป็นสำรองเท่านั้น + บันทึกสาเหตุไว้เสมอ
+// วันที่/เลขที่: ห้ามเดา — ใส่ '-' แล้วให้ validateReceiptData ตีกลับให้ถ่ายใหม่ (เดิมเติม "วันนี้" = เดามั่ว ตามที่ User แจ้ง)
+function ensureRequiredFields(result, fallbackDocType) {
+  if (!result) return result;
+  const cleaned = Object.assign({}, result);
+  const hasValue = (v) => { const s = String(v === null || v === undefined ? '' : v).trim(); return s && s !== '-'; };
+  // 1) ประเภทเอกสาร: ใบจริงมาก่อนเสมอ — AI extract ระบุชัด = จากใบจริง, ไม่ระบุ/กำกวม (ไม่ทราบ/อื่นๆ) = ยึดประเภทที่จำแนกจากภาพ, สุดท้ายค่อยค่าเริ่มต้น
+  const fromExtract = hasValue(cleaned.doc_type) && String(cleaned.doc_type).trim() !== 'ไม่ทราบ' && String(cleaned.doc_type).trim() !== 'อื่นๆ'
+    ? String(cleaned.doc_type).trim() : '';
+  const fromClassification = (fallbackDocType && fallbackDocType !== 'ไม่ทราบ' && fallbackDocType !== 'อื่นๆ') ? String(fallbackDocType).trim() : '';
+  if (fromExtract) {
+    cleaned.doc_type = fromExtract;
+    cleaned.doc_type_source = 'document';
+  } else if (fromClassification) {
+    cleaned.doc_type = fromClassification;
+    cleaned.doc_type_source = 'image_classification';
+    cleaned.doc_type_fallback_used = true;
+  } else {
+    cleaned.doc_type = 'อื่นๆ';
+    cleaned.doc_type_source = 'none';
+    cleaned.doc_type_fallback_used = true;
+  }
+  // 2) วันที่ในบิล: ต้องอ่านได้จากภาพจริงเท่านั้น — อ่านไม่ได้ให้ '-' (v3.15.4: validateReceiptData จะเติมเดือน/ปีปัจจุบัน วันที่ 01 + ติดธงรีวิวให้คนแก้ "วัน" ให้ตรงใบ ไม่ตีกลับให้ถ่ายใหม่)
+  if (!hasValue(cleaned.date) || !/^\d{4}-\d{2}-\d{2}$/.test(String(cleaned.date).trim())) {
+    cleaned.date = '-';
+    cleaned.date_missing = true;
+  }
+  // 3) เลขที่เอกสาร: ห้ามเดา — ไม่มีจริงให้ '-' (ผลักไป ref_no ตามโครงเดิม แล้ว validate ตัดสินอีกที)
+  if (!hasValue(cleaned.doc_no)) cleaned.doc_no = '-';
+  return cleaned;
 }
 
 // ==========================================
@@ -3220,9 +2916,14 @@ function getPreferredGeminiModels() {
 function buildUniversalOcrPrompt(fewShotBlock, feedbackBlock) {
   return `อ่านภาพเอกสารการเงิน/จัดซื้อของไทย แล้วตอบ Strict JSON object เท่านั้น ห้ามมี Markdown หรือข้อความนอก JSON
 
-ประเภท document_type ที่อนุญาต: INVOICE_TAX_INVOICE, RECEIPT, PURCHASE_ORDER, DELIVERY_NOTE, WEIGHBRIDGE, CREDIT_NOTE, DEBIT_NOTE, QUOTATION, INTERNAL_VOUCHER, UNKNOWN
+ประเภท document_type ที่อนุญาต: INVOICE_TAX_INVOICE, ABBREVIATED_TAX_INVOICE, RECEIPT, PURCHASE_ORDER, DELIVERY_NOTE, DELIVERY_TAX_INVOICE, DELIVERY_INVOICE_BILLING, WEIGHBRIDGE, CREDIT_NOTE, DEBIT_NOTE, QUOTATION, CUSTOMS, COMMERCIAL_INVOICE, INTERNAL_VOUCHER, ADVANCE_CLAIM, UNKNOWN
+doc_title_text: คัดลอกข้อความชื่อเอกสารที่พิมพ์บนหัวกระดาษตรงตัว (เช่น "ใบกำกับภาษี/ใบส่งของ", "TAX INVOICE") ถ้าไม่มีชื่อชัดเจนให้ "-"
+is_title_explicit: true ถ้าเห็นชื่อเอกสารพิมพ์ชัดเจนบนหัวกระดาษ, false ถ้าต้องคาดเดาจากองค์ประกอบภายใน
+doc_title_fallback: ถ้า is_title_explicit=false ให้คาดเดาจากองค์ประกอบ: มีเลขภาษี 13 หลักทั้งผู้ซื้อ-ผู้ขาย+VAT 7%+คำว่า ต้นฉบับ → INVOICE_TAX_INVOICE | มีหัวกระดาษกรมศุลกากร → CUSTOMS | หัวใบเขียน ABBREVIATED TAX INVOICE หรือไม่มีเลขภาษีผู้ซื้อแต่มี VAT → ABBREVIATED_TAX_INVOICE | มีตารางน้ำหนักเข้า/ออก/สุทธิ+ทะเบียนรถ → WEIGHBRIDGE | มีตราประทับ PAID/ได้รับเงินแล้ว → RECEIPT | มีรายการสินค้า+ยอดรวมแต่ไม่มี VAT → DELIVERY_NOTE | คลุมเครือจริง ๆ → UNKNOWN และติดธง review
+ai_notes: บันทึกข้อสังเกตคุณภาพเอกสารที่มีผลต่อการอ่าน (เช่น "ตราประทับทับตัวเลข VAT", "ลายมือเลือน") ถ้าปกติให้ "-" (รวมเข้า remark_text ตอนบันทึก)
 กฎห้ามเดา: ถ้าอ่านไม่ชัดให้ใช้ "-" สำหรับข้อความ, 0.00 สำหรับตัวเลข, [] สำหรับรายการ ห้ามเติมจากบริบท/ตัวอย่าง/บิลเก่า
 วันที่และเลขที่เอกสาร (doc_date + doc_number) เป็นฟิลด์สำคัญและต้องอ่านให้ได้จริงจากภาพ หากไม่เห็นจริง ๆ ให้ใส่ "-" และติดธง review ทันที ห้ามข้ามหรือเติมจากความคุ้นเคย
+doc_number ให้คัดลอกตามที่พิมพ์บนใบทั้งชุด: ถ้าเอกสารมีทั้ง "เล่มที่" และ "เลขที่" ให้รวมเป็นช่องเดียวในรูป "เล่มที่/เลขที่" เช่น "5/2680" (ห้ามแยกเล่มที่ออกไปไว้ที่อื่น) ถ้ามีแค่ "เลขที่" ให้ใส่เฉพาะเลขที่ตามใบ
 วันที่ให้เป็น ค.ศ. YYYY-MM-DD โดย พ.ศ. ให้ลบ 543 เท่านั้น
 remark_text ต้องรวมข้อความที่อ่านได้จริงจากหมายเหตุ/Remark/Note/Memo รวมลายมือเขียน
 เอกสารงานก่อสร้างต้องอ่าน project_location และ vehicle_registration เมื่อมีบนภาพ
@@ -3239,6 +2940,8 @@ ${feedbackBlock || ''}
 {
   "extraction": {
     "document_type": "INVOICE_TAX_INVOICE",
+    "doc_title_text": "-",
+    "is_title_explicit": true,
     "vendor_name": "-",
     "vendor_tax_id": "-",
     "doc_number": "-",
@@ -3265,12 +2968,15 @@ function adaptUniversalOcrResult(result) {
   const extraction = (result && result.extraction) || {};
   const matching = (result && result.matching_analysis) || {};
   const typeMap = {
-    INVOICE_TAX_INVOICE: 'ใบกำกับภาษี', RECEIPT: 'ใบเสร็จรับเงิน',
-    PURCHASE_ORDER: 'ใบสั่งซื้อ', DELIVERY_NOTE: 'ใบส่งของ', WEIGHBRIDGE: 'ใบชั่ง',
-    CREDIT_NOTE: 'ใบลดหนี้', DEBIT_NOTE: 'ใบเพิ่มหนี้', QUOTATION: 'ใบเสนอราคา', INTERNAL_VOUCHER: 'อื่นๆ', UNKNOWN: 'อื่นๆ'
+    INVOICE_TAX_INVOICE: 'ใบกำกับภาษี', ABBREVIATED_TAX_INVOICE: 'ใบกำกับภาษีอย่างย่อ', RECEIPT: 'ใบเสร็จรับเงิน',
+    PURCHASE_ORDER: 'ใบสั่งซื้อ', DELIVERY_NOTE: 'ใบส่งของ', DELIVERY_TAX_INVOICE: 'ใบส่งของ/ใบกำกับภาษี', DELIVERY_INVOICE_BILLING: 'ใบส่งของ/ใบแจ้งหนี้', WEIGHBRIDGE: 'ใบชั่ง',
+    CREDIT_NOTE: 'ใบลดหนี้', DEBIT_NOTE: 'ใบเพิ่มหนี้', QUOTATION: 'ใบเสนอราคา', CUSTOMS: 'ใบเสร็จกรมศุลกากร', COMMERCIAL_INVOICE: 'Commercial Invoice', ADVANCE_CLAIM: 'ใบขอเบิกเงินทดรองจ่าย', INTERNAL_VOUCHER: 'อื่นๆ', UNKNOWN: 'อื่นๆ'
   };
   const clean = function (v) { const s = String(v === undefined || v === null ? '' : v).trim(); return (!s || s === '-') ? '' : s; };
   const remark = clean(extraction.remark_text);
+  // 🎯 v3.17.0: หมายเหตุการอ่านของ AI (ai_notes) รวมเข้า remark — กันข้อมูลคุณภาพเอกสารหายจากสายตาคนตรวจ
+  const aiNotes = clean(extraction.ai_notes);
+  const remarkWithNotes = aiNotes ? (remark ? remark + ' | [AI] ' + aiNotes : '[AI] ' + aiNotes) : remark;
   const extractedPo = clean(extraction.extracted_po_code) || clean(matching.suggested_po_code);
   const weight = extraction.weight_details || {};
   const unit = String(weight.weight_unit || '').toLowerCase() === 'kg' ? 'kg' : 'ton';
@@ -3299,7 +3005,7 @@ function adaptUniversalOcrResult(result) {
     store_name: clean(extraction.vendor_name),
     vendor_tax_id: clean(extraction.vendor_tax_id),
     vat_amount: Number(extraction.vat_amount) || 0,
-    remark_text: remark,
+    remark_text: remarkWithNotes,
     extracted_po_code: extractedPo,
     ref_no: extractedPo,
     ref_label: extractedPo ? 'หมายเหตุ/PO' : '',
@@ -3309,6 +3015,12 @@ function adaptUniversalOcrResult(result) {
     total_amount: Number(extraction.total_amount) || 0,
     has_total: Number(extraction.total_amount) > 0,
     is_receipt: type !== 'อื่นๆ',
+    // 🎯 v3.17.0: ชื่อเอกสาร + สิทธิ์ VAT (คำนวณจาก doc_type ฝั่ง backend — ไม่ให้ AI เดา)
+    doc_title_text: clean(extraction.doc_title_text),
+    is_title_explicit: extraction.is_title_explicit === true,
+    ai_notes: clean(extraction.ai_notes),
+    is_vat_eligible: getVatEligibility(type).eligible,
+    tax_legal_ref: getVatEligibility(type).ref,
     readability: 'clear',
     confidence: Math.round((Number(matching.confidence_score) || 0) * 100),
     unreadable_reason: '-',
@@ -3337,8 +3049,8 @@ function analyzeReceiptWithGemini(imageBlob, fewShotBlock, feedbackBlock) {
 {
   "doc_type": "ประเภทเอกสาร เลือกจาก: ใบกำกับภาษี, ใบเสร็จรับเงิน, ใบส่งของ, ใบสั่งซื้อ, ใบวางบิล/ใบแจ้งหนี้, ใบชั่ง, อื่นๆ (ไม่แน่ใจให้ใส่ อื่นๆ)",
   "tax_invoice_no": "เลขที่ใบกำกับภาษี (ใช้เมื่อเอกสารเป็น 'ใบกำกับภาษี') ถ้าไม่มีให้ใส่ - ห้ามเดา",
-  "book_no": "เล่มที่ (เมื่อเอกสารมีคำว่า เล่มที่/เล่ม) ถ้าไม่มีให้ใส่ - ห้ามเดา",
-  "doc_no": "เลขที่ของเอกสารตามที่พิมพ์จริงบนบิล (เช่น เลขที่ใบเสร็จ/ใบส่งของ) ถ้าไม่มีให้ใส่ - ห้ามเดา",
+  "doc_no": "เลขที่ของเอกสารตามที่พิมพ์จริงบนบิล (เช่น เลขที่ใบเสร็จ/ใบส่งของ) — ถ้าเอกสารมีทั้ง "เล่มที่" และ "เลขที่" ให้รวมเป็น "เล่มที่/เลขที่" ในช่องนี้ช่องเดียว เช่น "5/2680" (ห้ามแยกเล่มที่ไว้ที่อื่น) ถ้าไม่มีให้ใส่ - ห้ามเดา",
+  "book_no": "(เลิกใช้ — ให้รวมเข้า doc_no เป็น เล่มที่/เลขที่ แล้ว ใส่ - เสมอ)",
   "ref_no": "เลขอ้างอิงอื่น เมื่อบิลไม่มีเลขที่/เล่มที่ เช่น เลขที่สัญญา, เลขเครื่อง, เลขผู้เสียภาษี, เลขที่ใบสั่งซื้อ — เอกสารใบรับของ/ใบชั่งตอนรับของ: ถ้าช่อง 'หมายเหตุ' เป็นเลขที่เอกสาร (เช่น เลขที่บิลส่งของ) ให้ใส่เลขนั้นที่นี่ พร้อม ref_label = 'หมายเหตุ' (ถ้าหมายเหตุเป็นข้อความอื่นหรือว่าง ให้ใส่ - ห้ามเดา) ถ้าไม่มีให้ใส่ - ห้ามเดา",
   "ref_label": "ชื่อเรียกของ ref_no เช่น 'เลขที่สัญญา' หรือ 'หมายเหตุ' (ถ้าไม่มีให้ใส่ -)",
   "vehicle_registration": "ทะเบียนรถที่พิมพ์บนใบชั่ง เช่น บบ 1234 บุรีรัมย์ (เฉพาะเอกสารประเภทใบชั่ง) ถ้าไม่มีให้ใส่ - ห้ามเดา",
@@ -3384,7 +3096,7 @@ function analyzeReceiptWithGemini(imageBlob, fewShotBlock, feedbackBlock) {
 - ตัวเลขทุกตัวต้องเห็นจริงในภาพเท่านั้น ห้ามคำนวณเติมหรือเดาเลขที่ขาด
 - แยกเลขให้ถูกช่อง ห้ามนำเลขของช่องหนึ่งไปใส่ผิดช่อง (ดูข้อความกำกับหน้าตัวเลขจริงบนบิล):
   • เอกสารที่มีคำว่า "ใบกำกับภาษี" → เลขที่นั้นคือ tax_invoice_no
-  • เอกสารที่มีคำว่า "เล่มที่/เล่ม" + "เลขที่" → แยกเข้า book_no และ doc_no ตามลำดับ
+  • เอกสารที่มีคำว่า "เล่มที่/เล่ม" + "เลขที่" → รวมเข้า doc_no เป็น "เล่มที่/เลขที่" ช่องเดียว เช่น "5/2680" (เลิกแยก book_no)
   • เอกสารที่ระบุแค่ "เลขที่" → ใส่ doc_no
   • เห็น "PO/เลขที่ใบสั่งซื้อ" → ใส่ po_number
   • ถ้าไม่มีเลขที่ใด ๆ ให้เหลือ doc_no/book_no/tax_invoice_no เป็น - แล้วใส่เลขที่ปรากฏอื่น ๆ ใน ref_no พร้อมบอกชื่อเรียกใน ref_label (ห้ามยัดเลขอื่นลง doc_no)
@@ -3491,121 +3203,56 @@ function analyzeReceiptWithGemini(imageBlob, fewShotBlock, feedbackBlock) {
 }
 
 // ==========================================
-// ANALYZE SMART — 2-pass พร้อมชุด prompt AI (Phase 2) + few-shot ตัวอย่าง
+// ANALYZE SMART — CLASSIFICATION-FIRST (2026-09-23)
 // ==========================================
-// Pass 1: วิเคราะห์พื้นฐาน → ได้ doc_type → ดึง "ชุด prompt ของหมวด" + ตัวอย่างแม่แบบ
-// Pass 2: ฉีดเข้า Gemini แล้ววิเคราะห์ซ้ำ (ถ้ารอบ 2 พลาด → ใช้ผลรอบ 1) — ไม่ล้มเหลวเมื่อชุด prompt เสีย
+// 1) CLASSIFY: ระบุประเภทเอกสารจากภาพก่อน (ป้องกันอ่านมั่วจากเดาประเภทผิด)
+// 2) EXTRACT: ใช้ prompt เฉพาะประเภทที่ตรวจพบ ดึงข้อมูลเต็มรูปแบบ
+// 3) ENSURE: รับประกันฟิลด์บังคับ 3 ฟิลด์ (ประเภทเอกสาร, วันที่, เลขที่เอกสาร) ต้องมีค่าเสมอ
 function analyzeReceiptSmart(imageBlob, options) {
   options = options || {};
   const storeHint = String(options.storeName || options.store_name || '').trim();
-  // Human-in-the-Loop: ฉีดบทเรียนการแก้ไขของ User เฉพาะร้าน (ถ้ารู้ชื่อร้านก่อนอ่าน เช่น RE-READ)
   const fbBlock = (storeHint && storeHint !== '-') ? feedbackPromptSection(getStoreFeedbackContext(storeHint)) : '';
-  const primary = analyzeReceiptWithGemini(imageBlob, '', fbBlock);
-  if (!primary) return primary;
 
-  // 🆓 ประหยัดโควตา Gemini (รุ่นฟรีจำกัดจำนวนคำขอ/วัน): ผลรอบ 1 ชัดเจนพอ → ใช้ได้เลย ไม่เรียก AI รอบ 2 (ลดครึ่งของคำขอ)
-  const conf = Number(primary.confidence);
-  const goodEnough = (conf >= 85) && (!primary.readability || primary.readability === 'clear');
-  if (goodEnough) return primary;
+  // 🎯 CLASSIFICATION-FIRST: ระบุประเภทจากภาพจริง ก่อนจะสกัดข้อมูล
+  const classification = classifyDocumentType(imageBlob);
+  const detectedType = classification.doc_type || 'ไม่ทราบ';
+  const classConf = classification.confidence || 0;
 
-  try {
-    const docType = String(primary.doc_type || '').trim();
-    if (!docType) return primary;
-    const inj = resolvePromptInjection(docType);
-    const blockBits = [];
-    if (inj.prompt_text && String(inj.prompt_text).trim()) {
-      blockBits.push('📌 ชุดคำสั่งเฉพาะของบิลประเภท "' + docType + '" (เขียนโดยระบบ AI จากตัวอย่างบิลที่ตรวจแล้ว):\n' + inj.prompt_text);
-    }
-    if (inj.few_shot && String(inj.few_shot).trim()) {
-      blockBits.push('📚 ตัวอย่างบิลที่ตรวจถูกแล้ว (จับรูปแบบการจัดหน้าเท่านั้น ห้ามลอกข้อมูลมาแต่ง):\n' + inj.few_shot);
-    }
-    if (!blockBits.length) return primary;
-    const enhanced = analyzeReceiptWithGemini(imageBlob, blockBits.join('\n\n'), fbBlock);
-    // รอบ 2 ส่วนใหญ่ดีกว่า แต่ถ้าพลาด (เช่น ไม่ใช่บิล) ให้ใช้ผลรอบ 1 เดิม
-    return (enhanced && enhanced.is_receipt !== false) ? enhanced : primary;
-  } catch (e) {
-    writeLog('⚠️ AI_TEMPLATE', 'few-shot enhance พลาด — ใช้ผลรอบ 1: ' + e.toString());
-    return primary;
+  writeLog('🔍 CLASSIFY', 'ประเภทที่ตรวจพบ: ' + detectedType + ' (conf=' + classConf + ', universal=' + (classification.universal_type || 'UNKNOWN') + ')');
+
+  // ดึง prompt เฉพาะประเภทที่ตรวจพบ (ถ้ามี)
+  const inj = resolvePromptInjection(detectedType);
+  const customPromptParts = [];
+  if (inj.prompt_text && String(inj.prompt_text).trim()) {
+    customPromptParts.push('📌 คำสั่งเฉพาะประเภท "' + detectedType + '":\n' + inj.prompt_text);
   }
-}
+  const customPrompt = customPromptParts.join('\n\n');
 
-// ==========================================
-// TEMPLATE CANDIDATE COLLECTION — เก็บตัวอย่างบิลใหม่ (ครั้งละรูปแบบเดียว) ให้ User ไปยืนยัน
-// ==========================================
-// หลักการ: บันทึกบิลทุกใบเข้าชีตตามปกติ แต่ถ้า "หน้าตายังไม่มีแม่แบบ" → เก็บเป็น Candidate (pending)
-// กันซ้ำ: ถ้ามี active template ครอบอยู่แล้ว หรือมี pending ที่ signature รูปแบบเดียวกัน → ข้าม (เก็บอย่างละ 1 ใบ)
-function ensureTemplateCandidateIfNeeded(imageBlob, receiptData, sender) {
-  try {
-    const docType = String((receiptData && receiptData.doc_type) || '').trim();
-    if (!docType) return null;
-    const signature = computeLayoutSignature(imageBlob);
-    if (!signature) return null;
-    // 1) ถ้าหมวดนี้มีชุด prompt พร้อมใช้แล้ว หรือมีตัวอย่างครบ 10 ใบ → ข้าม (ไม่เก็บซ้ำไม่ถ้วน)
-    if (promptSampleCapReached(docType)) {
-      writeLog('🤖 TEMPLATE', 'หมวด ' + docType + ' มีชุด prompt พร้อม/ตัวอย่างครบแล้ว — ข้ามเก็บ');
-      return null;
-    }
-    // 2) มี candidate pending รูปแบบเดียวกันค้างอยู่ → ข้าม (เก็บอย่างละ 1)
-    const dup = findPendingCandidateBySignature(docType, signature);
-    if (dup) {
-      writeLog('🤖 TEMPLATE', 'มี Candidate pending รูปแบบเดียวกันแล้ว (id=' + dup.id + ') — ข้าม');
-      return null;
-    }
-    // 3) ยังไม่มี → เก็บ 1 ใบเป็น Candidate (ทายประเภทเก็บไว้ที่ predicted_doc_type รอ User ลากจัด)
-    const cand = runAsInternal_(function () { return createTemplateCandidate(imageBlob, docType, receiptData, (sender && sender.displayName) || ''); }); // 🛡️ internal call
-    writeLog('🤖 TEMPLATE', cand ? 'เก็บ Candidate ใหม่ [' + docType + '] สำเร็จ (id=' + cand.id + ')'
-      : 'เก็บ Candidate ไม่สำเร็จ — ดู Log สีแดง');
-    return cand;
-  } catch (e) {
-    writeLog('⚠️ AI_TEMPLATE', 'ensureTemplateCandidateIfNeeded error: ' + e.toString());
-    return null;
+  // 🎯 บอก AI ล่วงหน้าว่าขั้นจำแนกเห็นประเภทอะไรจากภาพ (ชื่อจากใบจริงมาก่อน) — ให้ extract ยึดตามสิ่งที่เห็นบนใบ
+  if (detectedType && detectedType !== 'ไม่ทราบ') {
+    customPromptParts.push('🎯 ประเภทเอกสารที่ระบบจำแนกจากภาพขั้นแรก: "' + detectedType + '"' + (classification.title_seen ? ' (เห็นชื่อประเภทพิมพ์บนใบ: ' + (classification.real_name || '-') + ')' : ' (ไม่เห็นชื่อประเภทบนใบ — จำแนกจากลักษณะเอกสาร)') + '\n- ให้ doc_type ที่ตอบสอดคล้องกับสิ่งที่เห็นจริงบนใบ — ถ้าใบพิมพ์ชื่อประเภทชัดเจน ให้ใช้ชื่อที่พิมพ์บนใบจริงเป๊ะ ๆ (แม้ต่างจากข้างบน) ไม่ต้องบังคับเป็นรหัสภาษาอังกฤษ\n- ห้ามเปลี่ยนประเภทเพื่อให้เข้ากับแม่แบบ/ตัวอย่าง และห้ามอ่านฟิลด์ที่ประเภทนี้ไม่ควรมี (เช่น อย่าเอาเลขใบกำกับภาษีมาจากใบส่งของ)');
   }
-}
 
-// ตรวจว่าหมวด docType ยังต้องการเก็บตัวอย่างไหม (ชุด prompt ready แล้ว หรือตัวอย่าง >= 10 → หยุด)
-function promptSampleCapReached(docType) {
-  try {
-    const resp = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_prompts?doc_type=eq.' + encodeURIComponent(docType) + '&select=status,sample_count&limit=1', {
-      method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-    });
-    const list = (resp.getResponseCode() === 200) ? JSON.parse(resp.getContentText()) : [];
-    if (Array.isArray(list) && list.length && list[0] && String(list[0].status || '') === 'ready') return true;
-    const cnt = UrlFetchApp.fetch(supabaseBase() + '/rest/v1/ai_templates?predicted_doc_type=eq.' + encodeURIComponent(docType) + '&status=neq.archived&select=id&limit=11', {
-      method: 'GET', headers: supabaseAuthHeaders(), muteHttpExceptions: true
-    });
-    const rows = (cnt.getResponseCode() === 200) ? JSON.parse(cnt.getContentText()) : [];
-    return (Array.isArray(rows) && rows.length >= 10);
-  } catch (e) {
-    return false;
-  }
-}
+  // วิเคราะห์เต็มรูปแบบด้วย prompt เฉพาะประเภท
+  const result = analyzeReceiptWithGemini(imageBlob, customPrompt, fbBlock);
+  if (!result) return result;
 
-// หา candidate pending ที่ signature "รูปแบบเดียวกัน" (layout part เหมือนกัน — ตัด md5 per-image ออก)
-function findPendingCandidateBySignature(docType, signature) {
+  // รับประกันฟิลด์บังคับ 3 ฟิลด์ต้องมีค่าเสมอ
+  const finalResult = ensureRequiredFields(result, detectedType);
+  finalResult.classification_confidence = classConf;
+  finalResult.detected_universal_type = classification.universal_type || 'UNKNOWN';
+
+  // 🎯 ตรวจความขัดแย้ง: ประเภทจากขั้นอ่านข้อมูล vs ขั้นจำแนกภาพ (คนละขั้น คนละ prompt) — ขัดแย้ง = ติดธงให้คนตรวจ ไม่เดาฝ่ายใด
   try {
-    const url = getSupabaseUrl();
-    const key = getSupabaseKey();
-    if (!url || !key) return null;
-    // layout part = signature โดยไม่มีส่วน hash ของภาพต่อท้าย (เช่น aHash:32x32:)
-    const layoutPart = String(signature || '').replace(/:[0-9a-f]{16}$/i, '');
-    if (!layoutPart) return null;
-    const params = new URLSearchParams();
-    params.set('select', 'id,predicted_doc_type,layout_signature,status,created_at');
-    params.set('status', 'eq.pending');
-    params.set('predicted_doc_type', 'eq.' + docType);
-    params.set('layout_signature', 'like.' + layoutPart + '%');
-    params.set('limit', '1');
-    const resp = UrlFetchApp.fetch(url.replace(/\/+$/, '') + '/rest/v1/ai_templates?' + params, {
-      method: 'GET', headers: { 'apikey': key, 'Authorization': 'Bearer ' + key }, muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() === 200) {
-      const data = JSON.parse(resp.getContentText());
-      return (Array.isArray(data) && data.length) ? data[0] : null;
+    const normExtractType = normalizeDocType(finalResult.doc_type);
+    const normClassifiedType = normalizeDocType(detectedType);
+    if (normExtractType && normClassifiedType && normExtractType !== normClassifiedType && normExtractType !== 'อื่นๆ' && normClassifiedType !== 'อื่นๆ') {
+      finalResult.doc_type_conflict = true;
+      finalResult.doc_type_extract = finalResult.doc_type;
+      writeLog('⚠️ DOC-TYPE CONFLICT', 'extract="' + finalResult.doc_type + '" vs classify="' + detectedType + '" — ติดธงให้คนตรวจ (ใช้ค่าจากใบจริง: ' + finalResult.doc_type + ')');
     }
-    return null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { /* ตรวจขัดแย้งไม่ได้ — ไม่บล็อก flow */ }
+  return finalResult;
 }
 
 // ==========================================
@@ -3641,6 +3288,17 @@ var DOC_KNOWLEDGE_BASE = [
     signal: 'หัวใบเขียน "ใบส่งของ" / "ใบส่งสินค้า" / "Delivery Note" — ย้ำ: ต่างจากใบเสร็จรับเงินแม้รูปคล้ายกัน'
   },
   {
+    type: 'ใบส่งของ/ใบแจ้งหนี้', code: 'DO/INV', group: 'Delivery & Site Operations',
+    keywords: ['ใบส่งของ/ใบแจ้งหนี้', 'ใบส่งของ/ใบวางบิล', 'ใบส่งของ ใบแจ้งหนี้', 'Delivery Order / Invoice'],
+    nature: 'เอกสารฉบับเดียวที่เป็นทั้งหลักฐานการส่งมอบสินค้าและเรียกเก็บเงิน ไม่มีส่วนใบกำกับภาษีในตัวเอง ต้องตามเก็บใบกำกับ/ใบเสร็จประกอบ ไม่ใช่หลักฐานรับเงิน',
+    must_have: ['เลขที่เอกสาร', 'ยอดเงินที่เรียกเก็บ'],
+    money_doc: true,
+    delivery_document: true,
+    billing_document: true,
+    signal: 'หัวใบระบุทั้งใบส่งของและใบแจ้งหนี้ (หรือ ใบส่งของ/ใบวางบิล) มักมีรายการส่งมอบ+ปริมาณ พร้อมยอดเรียกเก็บ/กำหนดชำระ',
+    focus: 'ตรวจหัวใบส่งของ/ใบแจ้งหนี้ อ่านเลขที่เอกสาร เลข PO รายการส่งมอบ ปริมาณ หน่วย และยอดเรียกเก็บตามภาพจริง ห้ามถือเป็นใบกำกับภาษีหรือหลักฐานรับเงิน'
+  },
+  {
     type: 'ใบสั่งซื้อ', code: 'PO', group: 'Purchasing & Commercial',
     keywords: ['ใบสั่งซื้อ', 'ใบสั่ง', 'Purchase Order', 'P.O.'],
     nature: 'เอกสารฝั่งผู้ซื้อสั่งซื้อก่อนรับของ — ยังไม่ใช่การซื้อขายเกิดขึ้น ไม่ใช่หลักฐานหนี้/จ่ายเงิน',
@@ -3657,7 +3315,7 @@ var DOC_KNOWLEDGE_BASE = [
     signal: 'หัวใบเขียน "ใบวางบิล" / "ใบแจ้งหนี้" / "Invoice" มักมีกำหนดชำระ (Due Date)'
   },
   {
-    type: 'ใบชั่ง', code: 'WT', group: 'Delivery & Site Operations',
+    type: 'ใบชั่ง', display_name: 'ใบชั่งน้ำหนัก', code: 'WT', group: 'Delivery & Site Operations',
     keywords: ['ใบชั่ง', 'บัตรชั่ง', 'ใบชั่งน้ำหนัก', 'Weight Ticket', 'Weighbridge'],
     nature: 'หลักฐานการชั่งน้ำหนักรถเข้า-ออกสถานที่ — เน้นทะเบียนรถ+น้ำหนัก (เข้า/ออก/สุทธิ) ไม่ใช่เอกสารเงิน',
     must_have: [],
@@ -3744,6 +3402,38 @@ DOC_KNOWLEDGE_BASE = DOC_KNOWLEDGE_BASE.concat([
     must_have: ['เลขที่ใบเบิกเงินสดย่อย'], money_doc: true,
     signal: 'หัวใบระบุใบเบิกเงินสดย่อย/Petty Cash Voucher',
     focus: 'อ่านเลขที่ใบเบิกเงินสดย่อย ผู้เบิก รายการ ยอด และเอกสารอ้างอิง ห้ามถือว่าเคลม VAT ได้จากใบนี้เพียงลำพัง'
+  },
+  {
+    type: 'ใบกำกับภาษีอย่างย่อ', code: 'ABB', group: 'Tax & Receipts', legal: 'ม.86/6, ม.82/5(6)',
+    keywords: ['ใบกำกับภาษีอย่างย่อ', 'อย่างย่อ', 'ABBREVIATED TAX INVOICE'], nature: 'ใบกำกับภาษีแบบย่อ — ไม่มีชื่อ/เลขประจำตัวผู้เสียภาษีผู้ซื้อ ส่วนใหญ่เป็นใบเสร็จจากปั๊มน้ำมัน/ร้านค้าปลีก',
+    must_have: ['ยอดเงินรวม'], money_doc: true,
+    signal: 'หัวใบเขียน "ใบกำกับภาษีอย่างย่อ" หรือ "ABBREVIATED TAX INVOICE" และไม่มีช่องเลขประจำตัวผู้เสียภาษีผู้ซื้อ',
+    focus: 'อ่านเลขที่/วันที่/ชื่อผู้ขาย/เลขภาษีผู้ขาย/ยอดรวม+VAT — ห้ามถือว่าใช้เครดิตภาษีซื้อได้ (ลงเป็นรายจ่ายบริษัทได้)',
+    vat_eligible: false
+  },
+  {
+    type: 'ใบเสร็จกรมศุลกากร', code: 'CUSTOMS', group: 'Tax & Receipts', legal: 'ม.86/14',
+    keywords: ['ใบเสร็จกรมศุลกากร', 'ใบขนสินค้าขาเข้า', 'CUSTOMS', 'ศุลกากร'], nature: 'ใบเสร็จรับเงินกรมศุลกากรสำหรับการนำเข้าสินค้า (ภาษีนำเข้า + VAT นำเข้า)',
+    must_have: ['ยอดเงิน'], money_doc: true,
+    signal: 'มีตรา/หัวกระดาษกรมศุลกากร (Customs Department) หรือใบขนสินค้าขาเข้าพร้อมยอดภาษี',
+    focus: 'อ่านเลขที่/วันที่/ชื่อผู้นำเข้า/ยอดภาษี+VAT นำเข้า — ใช้เครดิตภาษีซื้อได้ (VAT นำเข้า)',
+    vat_eligible: true
+  },
+  {
+    type: 'Commercial Invoice', code: 'CI', group: 'Purchasing & Commercial', legal: 'ม.83/6 (ภ.พ.36)',
+    keywords: ['COMMERCIAL INVOICE', 'Commercial Invoice'], nature: 'ใบแจ้งหนี้สินค้าจากต่างประเทศ — ไม่มี VAT ไทยในตัวเอกสาร ต้องพิจารณายื่น ภ.พ.36 / ภ.ง.ด.54',
+    must_have: ['ยอดเงิน'], money_doc: true,
+    signal: 'หัวใบเขียน "COMMERCIAL INVOICE" และผู้ขายเป็นบริษัทต่างประเทศ (สกุลเงินต่าง/ที่อยู่ต่างประเทศ)',
+    focus: 'อ่านเลขที่/วันที่/ชื่อผู้ขายต่างประเทศ/ยอดรวมสุทธิ — ไม่มี VAT ไทย ห้ามเคลมภาษีซื้อจากใบนี้',
+    vat_eligible: false
+  },
+  {
+    type: 'ใบขอเบิกเงินทดรองจ่าย', code: 'ADV', group: 'Internal Accounting Vouchers',
+    keywords: ['ใบขอเบิกเงินทดรองจ่าย', 'เคลมค่าใช้จ่าย', 'เงินทดรองจ่าย', 'Advance/Expense Claim'], nature: 'เอกสารขอสำรองจ่ายหรือเคลมค่าใช้จ่ายภายใน ไม่ใช่เครดิตภาษีซื้อโดยลำพัง',
+    must_have: ['ยอดเงิน'], money_doc: true,
+    signal: 'หัวใบระบุ "ขอเบิกเงินทดรองจ่าย" / "เคลมค่าใช้จ่าย" พร้อมชื่อผู้ขอเบิก',
+    focus: 'อ่านเลขที่/วันที่/ผู้ขอเบิก/รายการ/ยอด — ต้องมีหลักฐานภาษีภายนอกประกอบการเคลม VAT',
+    vat_eligible: false
   }
 ]);
 
@@ -3769,6 +3459,22 @@ function getDocKnowledgeByType(normType) {
 function isMoneyDocType(normType) {
   const kb = getDocKnowledgeByType(normType);
   return !!(kb && kb.money_doc);
+}
+
+// 🎯 v3.17.0: ประเมินสิทธิ์เครดิตภาษีซื้อ (VAT 7%) จาก doc_type ตามตารางมาตรฐาน — คำนวณฝั่ง backend ไม่ให้ AI เดา
+// คืน { eligible: boolean|null, ref: string } — eligible=null = พิจารณาเคสต่อ (ประเภทองค์กร/อื่นๆ)
+function getVatEligibility(normType) {
+  const kb = getDocKnowledgeByType(normType);
+  if (kb && typeof kb.vat_eligible === 'boolean') {
+    return { eligible: kb.vat_eligible, ref: kb.legal || '' };
+  }
+  // ประเภทที่เคลมได้เมื่อเอกสารครบถ้วน (TAX, REC/TAX, CN, DN, DO/TAX)
+  const ELIGIBLE_WHEN_COMPLETE = ['ใบกำกับภาษี', 'ใบเสร็จรับเงิน/ใบกำกับภาษี', 'ใบลดหนี้', 'ใบเพิ่มหนี้', 'ใบส่งของ/ใบกำกับภาษี'];
+  if (ELIGIBLE_WHEN_COMPLETE.indexOf(normType) >= 0) {
+    return { eligible: true, ref: 'ม.86/4' };
+  }
+  if (kb) return { eligible: false, ref: kb.legal || '' };
+  return { eligible: null, ref: '' };
 }
 
 // ลำดับหมวดมาตรฐานบัญชี 4 หมวด (ใช้จัดกลุ่มรายการใน prompt ให้ AI อ่านเป็นหมวด — หมวดไหนไม่มีสมาชิกจะถูกข้าม)
@@ -3820,6 +3526,7 @@ function normalizeDocType(t) {
   // เอกสารรวม/เอกสารปรับปรุงต้องตรวจลำดับก่อน pattern ทั่วไป เพื่อไม่ให้คำว่า "กำกับภาษี" กลืนประเภทที่ละเอียดกว่า
   if (/เสร็จรับเงิน.*กำกับภาษี|กำกับภาษี.*เสร็จรับเงิน/.test(s)) return 'ใบเสร็จรับเงิน/ใบกำกับภาษี';
   if (/ส่งของ.*กำกับภาษี|กำกับภาษี.*ส่งของ/.test(s)) return 'ใบส่งของ/ใบกำกับภาษี';
+  if (/ส่งของ.*(แจ้งหนี้|วางบิล)|(แจ้งหนี้|วางบิล).*ส่งของ/.test(s)) return 'ใบส่งของ/ใบแจ้งหนี้';
   if (/ลดหนี้|credit\s*note/i.test(s)) return 'ใบลดหนี้';
   if (/เพิ่มหนี้|debit\s*note/i.test(s)) return 'ใบเพิ่มหนี้';
   if (/หักภาษี\s*ณ\s*ที่จ่าย|50\s*(ทวิ|bis)/i.test(s)) return 'หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)';
@@ -3831,6 +3538,7 @@ function normalizeDocType(t) {
   if (/เสนอราคา|quotation|\bquote\b/i.test(s)) return 'ใบเสนอราคา';
   if (/กำกับภาษี/.test(s)) return 'ใบกำกับภาษี';
   if (/วางบิล|แจ้งหนี้/.test(s)) return 'ใบวางบิล/ใบแจ้งหนี้';
+  // v3.17.1: "ใบชั่งน้ำหนัก" = ชื่อโชว์ใหม่ของ "ใบชั่ง" — normalize เข้าชื่อเดิมเพื่อคงตัวตนบิลเก่า (doc_key)
   if (/ชั่ง/.test(s)) return 'ใบชั่ง';
   if (/สั่งซื้อ|^PO$/i.test(s)) return 'ใบสั่งซื้อ';
   if (/ส่งของ|ใบส่ง/.test(s)) return 'ใบส่งของ';
@@ -3857,13 +3565,25 @@ function normalizeDocPart(s) {
   return t.toUpperCase();
 }
 
+// แยกคู่ เล่มที่/เลขที่ จาก doc_no — รองรับ 2 รูปแบบ:
+//   ใหม่: doc_no = "เล่มที่/เลขที่" รวมช่องเดียว (เช่น "5/2680") → แยกเล่มจากตัวหน้า "/"
+//   เก่า: เล่มที่อยู่ช่อง book_no แยก, doc_no เป็นเลขที่ล้วน → ใช้ book_no ตรง ๆ
+// ทำให้บิลเดียวกันที่เก็บสองรูปแบบได้ Doc Key เดียวกัน (แก้ปัญหา AI อ่านเห็นเลขที่แต่ไม่มีเล่มที่ = ถูกมองเป็นคนละเอกสาร)
+function splitCombinedDocNo(d) {
+  const raw = String((d && d.doc_no) || '').trim();
+  const m = raw.match(/^([^/]+)\/(.+)$/);
+  if (m) return { book: m[1].trim(), no: m[2].trim() };
+  return { book: String((d && d.book_no) || '').trim(), no: raw };
+}
+
 // สร้าง Doc Key จากตัวตนที่แข็งที่สุด → อ่อนที่สุด (ไม่มีเลย = คืน '' ห้ามเดา)
 function buildDocKey(d) {
   if (!d) return '';
   const type = normalizeDocPart(normalizeDocType(d.doc_type));
   const tax = normalizeDocPart(d.tax_invoice_no);
-  const book = normalizeDocPart(d.book_no);
-  const doc = normalizeDocPart(d.doc_no);
+  const pair = splitCombinedDocNo(d); // v3.15.2: รองรับ doc_no แบบรวม "เล่มที่/เลขที่" — key เดียวกับบิลเก่าที่เล่ม/เลขที่แยกช่อง
+  const book = normalizeDocPart(pair.book);
+  const doc = normalizeDocPart(pair.no);
   const ref = normalizeDocPart(d.ref_no);
   if (tax) return 'TAX:' + tax;
   if (doc) return 'DOC:' + (type || 'NA') + ':' + book + ':' + doc;
@@ -3877,7 +3597,9 @@ function buildDocLabel(d) {
   const parts = [];
   if (d.doc_type) parts.push(d.doc_type);
   if (d.tax_invoice_no) parts.push('เลขที่ใบกำกับภาษี ' + d.tax_invoice_no);
-  if (d.book_no) parts.push('เล่มที่ ' + d.book_no);
+  // v3.15.2: doc_no แบบรวม "เล่มที่/เลขที่" (เช่น 5/2680) → ไม่ต้องโชว์ เล่มที่ ซ้ำอีกช่อง
+  const bookInNo = d.book_no && d.doc_no && String(d.doc_no).indexOf(String(d.book_no) + '/') === 0;
+  if (d.book_no && !bookInNo) parts.push('เล่มที่ ' + d.book_no);
   if (d.doc_no) parts.push('เลขที่ ' + d.doc_no);
   if (!d.tax_invoice_no && !d.doc_no && d.ref_no) {
     parts.push((d.ref_label ? String(d.ref_label) : 'เลขอ้างอิง') + ' ' + d.ref_no);
@@ -3943,22 +3665,38 @@ function validateReceiptData(d) {
 
   // 5) ฟิลด์สำคัญ: วันที่ + เลขที่เอกสาร/เลขอ้างอิง ต้องมีค่าจริงจากภาพ มิฉะนั้นบันทึกอัตโนมัติไม่ได้
   //    ป้องกันบิลที่ "ไร้ตัวตน" และ AI สร้าง blank value ให้ถูกบันทึกลงฐานข้อมูล
-  const noDocIdentity = isBlank(d.doc_no) && isBlank(d.tax_invoice_no) && isBlank(d.ref_no);
+  const noDocIdentity = isBlank(d.doc_no) && isBlank(d.book_no) && isBlank(d.tax_invoice_no) && isBlank(d.ref_no);
   const noDateValue = isBlank(d.date);
   if (noDocIdentity) {
     reasons.push('เลขที่เอกสาร/เลขอ้างอิงหลักขาดหายไป — ต้องตรวจภาพใหม่ก่อนบันทึก');
   }
+  // v3.15.4: วันที่อ่านไม่ชัด/ขาดหาย → ไม่ตีกลับให้ถ่ายใหม่ — เติม "เดือน/ปีปัจจุบัน" (วันที่ 01 ของเดือน) เป็นหลักก่อน
+  //     กติกา: "วัน" ต้องอ่านจากบิลเท่านั้น ห้ามเอาวันนี้ไปใส่แทน — แต่เติมเดือน/ปีได้ เพื่อไม่ให้บิลหล่นไปอยู่ไกล (วันที่ว่าง/ผิดงวด)
+  //     ตรวจสอบได้ทั่วถึงกว่า — และติดธงรีวิวให้คนยืนยัน/แก้ให้ตรงตามใบจริงเสมอ
   if (noDateValue) {
-    reasons.push('วันที่ในบิลขาดหายไป — ต้องตรวจภาพใหม่ก่อนบันทึก');
+    // v3.15.4: เติมเฉพาะเดือน/ปีปัจจุบัน (วันที่ 01 ของเดือน) — "วัน" ต้องอ่านจากใบ ห้ามเอาวันนี้ไปใส่แทน
+    const ymNow0 = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM');
+    d.date = ymNow0 + '-01';
+    d.date_fallback_used = true;
+    reviewReasons.push('อ่านวันที่ในบิลไม่ชัด — ระบบเติมเดือน/ปีปัจจุบัน (' + d.date + ') กันบิลหล่นไปไกล วันที่จริงต้องอ่านจากใบ กรุณาตรวจและแก้ไขให้ตรงตามใบจริง');
+  }
+
+  // 7.7) ประเภทเอกสารขัดแย้งระหว่างขั้นจำแนกภาพกับขั้นอ่านข้อมูล → ให้คนยืนยัน (กันประเภทผิดถูกบันทึกเงียบ ๆ)
+  if (d.doc_type_conflict) {
+    reviewReasons.push('ประเภทเอกสารขัดแย้งระหว่างการจำแนกภาพกับการอ่านใบ (อ่านจากใบ: ' + String(d.doc_type_extract || '-') + ' / จำแนกจากภาพ: ' + String(d.doc_type || '-') + ') — กรุณายืนยัน/แก้ไขประเภทเอกสาร');
   }
 
   const docKey = buildDocKey(d);
   if (!docKey) reviewReasons.push('ไม่พบเลขที่เอกสาร/เลขอ้างอิง (ต้องตรวจตัวตนบิลด้วยคน)');
 
-  // 6) วันที่: ถ้าอ่านไม่ได้/ปีเพี้ยน → เตือน/ห้ามผ่าน auto-save
+  // 6) วันที่: ถ้าอ่านไม่ได้/ปีเพี้ยน → เตือน/ติดธงรีวิว (v3.15.4: อ่านไม่ได้ = เติมเดือน/ปีปัจจุบัน วันที่ 01 — วันต้องอ่านจากใบ)
   const dateStr = String(d.date || '').trim();
   if (isBlank(d.date) || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    reviewReasons.push('อ่านวันที่ในบิลไม่ได้');
+    // v3.15.4: เติมเฉพาะเดือน/ปีปัจจุบัน (วันที่ 01) — วันต้องอ่านจากใบ ห้ามเอาวันนี้ไปใส่แทน
+    const ymNow0b = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM');
+    d.date = ymNow0b + '-01';
+    d.date_fallback_used = true;
+    reviewReasons.push('อ่านวันที่ในบิลไม่ได้ (รูปแบบเพี้ยน: ' + (dateStr || '-') + ') — ระบบเติมเดือน/ปีปัจจุบัน (' + d.date + ') วันที่จริงต้องอ่านจากใบ กรุณาตรวจและแก้ไขให้ตรงตามใบจริง');
   } else {
     let y = parseInt(dateStr.substring(0, 4), 10);
     // บิลไทยมักระบุ พ.ศ. — ถ้า AI ส่งปี พ.ศ. มา (25xx-26xx) แปลงเป็น ค.ศ. แบบตรงไปตรงมา
@@ -3971,6 +3709,11 @@ function validateReceiptData(d) {
     if (y < 2000 || y > nowYear + 1) {
       reviewReasons.push('วันที่ในบิลไม่น่าเชื่อถือ (อ่านได้ ' + dateStr + ')');
     }
+  }
+
+  // 6b) บิลที่มีแต่ "เล่มที่" ล้วน (ไม่มีเลขที่) = มีตัวตนบางส่วน — บันทึกได้แต่ติดธงให้คนเติมเลขที่ให้ครบ (v3.15.2: เลิก fail เพราะ AI รวมเล่มที่ใน doc_no แล้ว)
+  if (!isBlank(d.book_no) && isBlank(d.doc_no) && isBlank(d.tax_invoice_no) && isBlank(d.ref_no)) {
+    reviewReasons.push('มีแต่เล่มที่ (' + d.book_no + ') แต่ไม่มีเลขที่เอกสาร — กรุณาเติมเลขที่ให้ครบ (รูปแบบ เล่มที่/เลขที่ เช่น 5/2680)');
   }
 
   // 7) รายการสินค้า: ไม่มีเลย = ใช้ไม่ได้
@@ -4432,6 +4175,26 @@ function findSoftDuplicate(data) {
   const cDate = headers.indexOf('Date');
   const cTotal = headers.indexOf('Total Amount');
   if (cStore === -1 || cDate === -1 || cTotal === -1) return false;
+  // v3.15.2: เทียบตัวตนเอกสารด้วย (book/doc/tax/ref normalize แล้ว) — กัน "เล่มที่/เลขที่" ใน doc_no กับบิลเก่าแยกช่อง ถูกมองเป็นคนละบิล
+  const cBook = headers.indexOf('Book No.');
+  const cDoc = headers.indexOf('Doc No.');
+  const cTax = headers.indexOf('Tax Invoice No.');
+  const cRef = headers.indexOf('Ref No.');
+  const selfKey = buildDocKey(data);
+  const selfLabel = normalizeDocPart(selfKey);
+  const rowKeyOf = (row) => {
+    const dk = normalizeDocPart(String(row[headers.indexOf('Doc Key')] || ''));
+    if (selfLabel && dk && dk === selfLabel) return true;
+    if (cTax !== -1 && normalizeDocPart(row[cTax]) && normalizeDocPart(row[cTax]) === normalizeDocPart(data.tax_invoice_no)) return true;
+    if (cDoc !== -1) {
+      const pair = splitCombinedDocNo({ doc_no: row[cDoc], book_no: cBook !== -1 ? row[cBook] : '' });
+      const pair2 = splitCombinedDocNo({ doc_no: data.doc_no, book_no: data.book_no });
+      if (normalizeDocPart(pair2.no) && normalizeDocPart(pair.no) === normalizeDocPart(pair2.no)
+        && normalizeDocPart(pair.book) === normalizeDocPart(pair2.book)) return true;
+    }
+    if (cRef !== -1 && normalizeDocPart(row[cRef]) && normalizeDocPart(row[cRef]) === normalizeDocPart(data.ref_no)) return true;
+    return false;
+  };
 
   const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
   for (let i = 0; i < rows.length; i++) {
@@ -4440,6 +4203,9 @@ function findSoftDuplicate(data) {
     if (d instanceof Date) d = Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy-MM-dd');
     d = String(d || '').trim();
     const t = Number(rows[i][cTotal] || 0);
+    // v3.15.2: ตัวตนเอกสารตรงกัน (doc_key/เลขที่/เลขกำกับ/อ้างอิง) = ซ้ำแน่ ไม่ต้องดูยอด
+    if (rowKeyOf(rows[i])) return true;
+    // เดิม: ร้าน+วันที่+ยอดตรงกัน = อาจซ้ำ (soft)
     if (s === store && d === date && Math.abs(t - total) < 0.01) return true;
   }
   return false;
@@ -4705,6 +4471,10 @@ function updateReceipt(payload) {
 
     const oldTotal = colTotal !== -1 ? sheet.getRange(rowIndex, colTotal + 1).getValue() : 0;
 
+    // เก็บค่าเดิมของ PO (ก่อนเขียนทับ) สำหรับ log 'แก้ไขบิล' — oldPo เคยหายไปตอน refactor → ReferenceError: oldPo is not defined (แก้แล้ว 2026-09-23)
+    const colPoForLog = colIndex['PO No.'] !== undefined ? colIndex['PO No.'] : -1;
+    const oldPo = colPoForLog !== -1 ? String(sheet.getRange(rowIndex, colPoForLog + 1).getValue() || '').trim() : '';
+
     const reviewReasons = [];
     if (!newDocKey) reviewReasons.push('ไม่พบเลขที่เอกสาร/เลขอ้างอิง (ต้องตรวจตัวตนบิลด้วยคน)');
     if (!String(payload.store_name || '').trim()) reviewReasons.push('ไม่ได้ระบุชื่อร้านค้า/ผู้ขาย');
@@ -4724,6 +4494,8 @@ function updateReceipt(payload) {
       'Tax Invoice No.': docIdentity.tax_invoice_no || '',
       'Ref No.': docIdentity.ref_no || '',
       'Ref Label': docIdentity.ref_label || '',
+      // v3.18.0: หมายเหตุในเอกสาร — เขียนเฉพาะเมื่อ payload ส่งค่ามา (undefined = ฟอร์มเก่าไม่มีช่อง ไม่ล้างค่าเดิม)
+      ...(payload.remark_text !== undefined ? { 'Remark Text': String(payload.remark_text || '').trim() } : {}),
       'Doc Key': newDocKey,
       'Needs Review': reviewReasons.length > 0,
       'Review Reason': reviewReasons.join(' | ')
@@ -4739,8 +4511,29 @@ function updateReceipt(payload) {
     if (payload.requester !== undefined) rowValues['Requester'] = (payload.requester === '-') ? '' : payload.requester;
     if (payload.pay_approver !== undefined) rowValues['Pay Approver'] = (payload.pay_approver === '-') ? '' : payload.pay_approver;
 
+    // 🔢 เช็ค/การันตี "เลขที่รายการระบบ" (System Record No.) = ตัวตนถาวรของบิล — เพราะเลขที่เอกสาร AI อาจอ่านผิด
+    //     ใช้ในการหาแถว/อัปเดตเป็นหลัก (findReceiptRowByAny จับ SRN อันดับแรก) กันโดนบิลอื่นเมื่อ doc_key เพี้ยน
+    const colSrnChk = colIndex['System Record No.'] !== undefined ? colIndex['System Record No.'] : -1;
+    const srnOnRow = colSrnChk !== -1 ? Number(sheet.getRange(rowIndex, colSrnChk + 1).getValue()) : NaN;
     if (!isNaN(targetSrn) && targetSrn > 0) {
-      rowValues['System Record No.'] = targetSrn;
+      // มี SRN ส่งมาจากหน้าเว็บ → ยืนยันตรงกับแถวจริง แล้วเขียนกลับกันค่าหลุด
+      if (!isNaN(srnOnRow) && srnOnRow > 0 && srnOnRow !== targetSrn) {
+        writeLog('⚠️ SRN', 'แก้ไขบิลแถวที่ ' + rowIndex + ': SRN ไม่ตรงกัน — ชีตมี #' + srnOnRow + ' แต่หน้าเว็บส่ง #' + targetSrn + ' (ยึดค่าจากชีต #' + srnOnRow + ' เป็นหลัก)');
+        rowValues['System Record No.'] = srnOnRow;
+      } else {
+        rowValues['System Record No.'] = targetSrn;
+      }
+    } else {
+      // ยังไม่มีเลขที่รายการระบบบนบิล → แบรนด์ให้เลย (เอกสารตัวตนจะใช้เลขนี้ ไม่พึ่งเลขที่เอกสารที่ AI อ่านผิด)
+      if (!isNaN(srnOnRow) && srnOnRow > 0) {
+        rowValues['System Record No.'] = srnOnRow;
+      } else {
+        const ensuredSrn = ensureSystemRecordNoForReceipt(targetDocKey, {});
+        if (ensuredSrn) {
+          rowValues['System Record No.'] = ensuredSrn;
+          writeLog('🔢 SRN', 'แก้ไขบิลแถวที่ ' + rowIndex + ': ยังไม่มีเลขที่รายการระบบ → กำหนด #' + ensuredSrn + ' (ตัวตนถาวรสำหรับแก้ครั้งถัดไป)');
+        }
+      }
     }
 
     // 4.5) เก็บค่าเดิมของแถว (ที่ AI อ่านไว้ก่อนหน้า) ไว้เทียบกับค่าที่มนุษย์แก้ → เป็นบทเรียนของ AI (กฎข้อเรียนรู้)
@@ -4784,7 +4577,7 @@ function updateReceipt(payload) {
     // 5.5) Sync การแก้ไขลง Supabase ด้วย (แหล่งข้อมูลหลักของหน้าเว็บ) — พยายามเต็มที่ แต่ไม่บล็อกการแก้
     let sbMsg = '';
     try {
-      updateSupabaseReceipt(srcDocKey, {
+      const sbRes = updateSupabaseReceipt(srcDocKey, {
         po_number: newPo,
         date: payload.date || '',
         store_name: payload.store_name || '',
@@ -4798,6 +4591,7 @@ function updateReceipt(payload) {
         tax_invoice_no: docIdentity.tax_invoice_no || '',
         ref_no: docIdentity.ref_no || '',
         ref_label: docIdentity.ref_label || '',
+        remark_text: (payload.remark_text === undefined) ? undefined : String(payload.remark_text || '').trim(), // v3.18.0: หมายเหตุในเอกสาร (updateSupabaseReceipt สนับสนุน remark_text อยู่แล้ว)
         scale_weight_in: (payload.scale_weight_in === undefined) ? undefined : ((payload.scale_weight_in === '' || payload.scale_weight_in === null || payload.scale_weight_in === '-') ? null : Number(payload.scale_weight_in)),
         scale_weight_out: (payload.scale_weight_out === undefined) ? undefined : ((payload.scale_weight_out === '' || payload.scale_weight_out === null || payload.scale_weight_out === '-') ? null : Number(payload.scale_weight_out)),
         scale_weight_net: (payload.scale_weight_net === undefined) ? undefined : ((payload.scale_weight_net === '' || payload.scale_weight_net === null || payload.scale_weight_net === '-') ? null : Number(payload.scale_weight_net)),
@@ -4809,7 +4603,8 @@ function updateReceipt(payload) {
         needs_review: reviewReasons.length > 0,
         review_reason: reviewReasons.join(' | ')
       }, targetSrn);
-      sbMsg = ' + Sync Supabase OK';
+      // 🛡️ matched=0 = Supabase ไม่มีแถวนี้ (doc_key/SRN ไม่ตรง) — แจ้งผู้ใช้ ไม่ปล่อยเงียบ (กันคิดว่า sync แล้วแต่ตารางไม่เปลี่ยน)
+      sbMsg = (sbRes && sbRes.matched === 0) ? ' + ⚠️ Sync Supabase: patch ไม่โดนแถว (ตรวจ doc_key ใน Supabase)' : ' + Sync Supabase OK';
     } catch (sbErr) {
       sbMsg = ' + ⚠️ Sync Supabase ล้มเหลว: ' + sbErr.toString();
       writeLog('⚠️ SUPABASE', 'updateSupabaseReceipt: ' + sbErr.toString());
@@ -4845,7 +4640,10 @@ function updateReceipt(payload) {
       writeLog('⚠️ FEEDBACK', 'updateReceipt feedback: ' + fbErr.toString());
     }
 
-    return { success: true, message: 'บันทึกการแก้ไขบิลเรียบร้อยแล้ว (PO: ' + newPo + ')' + sbMsg };
+    const finalSrn = Number(rowValues['System Record No.'] || (srnOnRow > 0 ? srnOnRow : 0)) || 0;
+
+    // 2026-09-23: คืนเลขที่รายการระบบ + doc_key ตัวจริงที่เขียนไปจริง → ฝั่งหน้าเว็บใช้รีเฟรชเฉพาะรายการนี้ (ไม่ต้องโหลดตารางใหม่)
+    return { success: true, message: 'บันทึกการแก้ไขบิลเรียบร้อยแล้ว (PO: ' + newPo + ')' + sbMsg, system_record_no: finalSrn, doc_key: srcDocKey || newDocKey };
   } catch (err) {
     writeLog('❌ ERROR', 'updateReceipt: ' + err.toString());
     return { success: false, message: 'เกิดข้อผิดพลาดในการแก้ไข: ' + err.toString() };
@@ -5184,29 +4982,48 @@ function saveEditedReceiptImage(payload) {
 
     const blob = Utilities.newBlob(bytes, mimeType, payload.filename || ('receipt_edit_' + Date.now() + '.jpg'));
 
-    // บันทึกเป็น "ไฟล์ใหม่" (file ID ใหม่) แทนการเขียนทับเข้าไฟล์เดิม
-    // เพราะ Google Drive แคช /thumbnail ฝั่งเซิร์ฟเวอร์ไว้ที่ file ID เดิม — ต่อให้เขียนทับเนื้อหาแล้ว
-    // ก็ยังเสิร์ฟภาพเก่าให้อยู่ (uc?export=view แก้ได้แต่บางกรณีเรนเดอร์ใน <img> ไม่ได้)
-    // ไฟล์ใหม่ = thumbnail ของมันถูกสร้างครั้งแรกจากเนื้อหาปัจจุบัน → โชว์ภาพที่แก้แล้วทันที
-    // และยังอยู่ในโฟลเดอร์เดิมของบิล (อนุรักษ์โครงสร้างปี/เดือน)
     const origFile = DriveApp.getFileById(fileId);
+    let newImageFileId = '';
+
+    // 🖼️ v3.15.9 ตาม User (อาการยืนยันจริง): เขียนทับไฟล์เดิม (file ID เดิม) แล้ว Google Drive ยังเสิร์ฟ thumbnail ภาพเก่า
+    //     เพราะ Drive แคช thumbnail ตาม file ID ฝั่งเซิร์ฟเวอร์ — ต่อ v= ท้าย URL หลอกแคชเบราว์เซอร์ได้ แต่หลอกแคช Drive ไม่ได้
+    //     → ผล: แผงแก้ไข (โหลดไฟล์จริง) เห็นภาพใหม่ แต่ตาราง/ดูบิลเต็ม (โหลดผ่าน thumbnail) เห็นภาพเก่า = 3 จุดไม่ตรงกัน
+    //     ✅ ทางแก้ถาวร: สร้าง "ไฟล์ใหม่" (file ID ใหม่ = ไม่เคยมีแคช = thumbnail สดการันตี) + ลบไฟล์เดิม "ถาวร" ทันที (ไม่ทิ้งขยะ)
+    //        โหมดเขียนทับ (Advanced Service/REST) เก็บไว้เป็นเส้นทางสำรองเมื่อสร้างไฟล์ใหม่ล้มเหลวเท่านั้น
     let targetFolder = getOrCreateDriveFolder();
     try {
       const parents = origFile.getParents();
       if (parents.hasNext()) targetFolder = parents.next();
     } catch (e) { /* ใช้โฟลเดอร์หลัก */ }
+    blob.setName(origFile.getName()); // คงชื่อไฟล์เดิมไว้
+    try {
+      const newFile = targetFolder.createFile(blob);
+      newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      newImageFileId = newFile.getId();
+      // ลบไฟล์เดิม "ถาวร" ทันที (ไม่ทิ้งขยะในถัง) — ถ้าลบถาวรไม่ได้ค่อยทิ้งถังขยะเป็นรอบสอง
+      const delResult = driveRestDeleteFilePermanent_(fileId);
+      writeLog('🖼️ IMAGE EDIT', 'แก้ไขรูปบิล: สร้างไฟล์ใหม่ ' + newImageFileId + ' (เดิม ' + fileId + ') ขนาด ' + Math.round(bytes.length / 1024) + ' KB | ลบไฟล์เดิม: ' + delResult + ' — thumbnail สดการันตี (ไม่มีแคชเดิม)');
+    } catch (createErr) {
+      // สร้างไฟล์ใหม่ไม่สำเร็จ (โควตา/สิทธิ์) → เส้นทางสำรอง: เขียนทับไฟล์เดิม (ยอมรับว่า thumbnail อาจภาพเก่าชั่วคราว)
+      writeLog('⚠️ IMAGE EDIT', 'สร้างไฟล์ใหม่ไม่สำเร็จ (' + createErr.toString() + ') — เขียนทับไฟล์เดิมแทน');
+      let overwritten = false;
+      if (typeof Drive !== 'undefined' && Drive.Files && Drive.Files.update) {
+        Drive.Files.update({}, fileId, blob);
+        overwritten = true;
+        writeLog('🖼️ IMAGE EDIT', 'แก้ไขรูปบิล (สำรอง): เขียนทับภาพเดิมในไฟล์ ' + fileId + ' (Advanced Service)');
+      } else if (driveRestOverwriteFile_(fileId, blob)) {
+        overwritten = true;
+        writeLog('🖼️ IMAGE EDIT', 'แก้ไขรูปบิล (สำรอง): เขียนทับภาพเดิมในไฟล์ ' + fileId + ' (Drive REST API)');
+      }
+      if (!overwritten) return { success: false, message: 'บันทึกรูปไม่สำเร็จ (สร้างไฟล์ใหม่/เขียนทับไม่ได้) กรุณาลองใหม่' };
+      origFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      newImageFileId = fileId;
+    }
 
-    const newFile = targetFolder.createFile(blob);
-    newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-
-    // ย้ายไฟล์เก่าที่โดนเขียนทับไปถังขยะ (กู้คืนได้ 30 วัน) — ไม่ให้มีไฟล์รุ่นค้างอยู่ในโฟลเดอร์
-    try { origFile.setTrashed(true); } catch (e) { /* ข้ามถ้าลบไม่ได้ */ }
-
-    // อัปเดต Image URL ในชีตเป็น thumbnail ของไฟล์ใหม่ + cache-bust (v= กันแคชเบราว์เซอร์)
-    const newImageUrl = 'https://drive.google.com/thumbnail?id=' + newFile.getId() + '&sz=w1200&v=' + Date.now();
+    // อัปเดต Image URL ในชีต/Supabase — โหมดหลัก = fileId ใหม่ (thumbnail สดการันตี); โหมดสำรอง = fileId เดิม (v= ช่วยเฉพาะแคชเบราว์เซอร์)
+    const newImageUrl = 'https://drive.google.com/thumbnail?id=' + newImageFileId + '&sz=w1200&v=' + Date.now();
     updateReceiptImageUrl(payload, newImageUrl);
 
-    writeLog('🖼️ IMAGE EDIT', 'แก้ไขรูปบิล: สร้างไฟล์ใหม่ ' + newFile.getId() + ' (เดิม ' + fileId + ') ขนาด ' + Math.round(bytes.length / 1024) + ' KB');
     return { success: true, message: 'บันทึกรูปบิลเรียบร้อยแล้ว', new_image_url: newImageUrl };
   } catch (err) {
     writeLog('❌ ERROR', 'saveEditedReceiptImage: ' + err.toString());
@@ -5214,65 +5031,138 @@ function saveEditedReceiptImage(payload) {
   }
 }
 
+// 🛡️ เขียนทับเนื้อหาไฟล์ Drive เดิมผ่าน Drive REST API v3 ด้วย OAuth token ของสคริปต์เอง
+//     (DriveApp แทนเนื้อหาไฟล์ตรง ๆ ไม่ได้ — DriveApp.File ไม่มี setBlob — ส่วน Advanced Service ต้องเปิดเอง)
+//     ไฟล์ ID เดิมคงเดิม = URL เดิม = ไม่มีไฟล์ขยะ | คืน true ถ้าสำเร็จ (HTTP 2xx)
+function driveRestOverwriteFile_(fileId, blob) {
+  try {
+    const token = ScriptApp.getOAuthToken();
+    if (!token) return false;
+    const resp = UrlFetchApp.fetch(
+      'https://www.googleapis.com/upload/drive/v3/files/' + encodeURIComponent(fileId) + '?uploadType=media&supportsAllDrives=true',
+      {
+        method: 'patch',
+        contentType: blob.getContentType() || 'image/jpeg',
+        payload: blob.getBytes(),
+        headers: { 'Authorization': 'Bearer ' + token },
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    if (code >= 200 && code < 300) return true;
+    writeLog('⚠️ IMAGE EDIT', 'Drive REST overwrite HTTP ' + code + ': ' + resp.getContentText().substring(0, 200));
+    return false;
+  } catch (e) {
+    writeLog('⚠️ IMAGE EDIT', 'Drive REST overwrite error: ' + e.toString());
+    return false;
+  }
+}
+
+// 🛡️ ลบไฟล์ Drive แบบถาวร (ข้ามถังขยะ — ไม่ทิ้งขยะ) ผ่าน Drive REST API v3
+//     ถ้าลบถาวรไม่สำเร็จ (scope/สิทธิ์) → ทิ้งถังขยะแทน (setTrashed) และรายงานผล
+//     คืนสตริงสถานะ: deleted | trashed | failed
+function driveRestDeleteFilePermanent_(fileId) {
+  try {
+    const token = ScriptApp.getOAuthToken();
+    if (token) {
+      const resp = UrlFetchApp.fetch(
+        'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?supportsAllDrives=true',
+        { method: 'delete', headers: { 'Authorization': 'Bearer ' + token }, muteHttpExceptions: true }
+      );
+      const code = resp.getResponseCode();
+      if (code === 204 || code === 200) return 'deleted (ถาวร)';
+      writeLog('⚠️ IMAGE EDIT', 'Drive REST delete HTTP ' + code + ': ' + resp.getContentText().substring(0, 200));
+    }
+  } catch (e) {
+    writeLog('⚠️ IMAGE EDIT', 'Drive REST delete error: ' + e.toString());
+  }
+  try { DriveApp.getFileById(fileId).setTrashed(true); return 'trashed (ถังขยะ)'; } catch (e2) { return 'failed (ลบไม่ได้)'; }
+}
+
 function updateReceiptImageUrl(payload, newImageUrl) {
   try {
+    const fileId = extractDriveFileId(newImageUrl) || extractDriveFileId(payload.image_url || payload.image_original_url || '');
+    let sheetOk = false;
+    let sheetDocKey = '';
     const ss = getSpreadsheet();
     const sheet = ss.getSheetByName('บิลจัดซื้อ (Receipts)');
-    if (!sheet || sheet.getLastRow() <= 1) return false;
+    if (sheet && sheet.getLastRow() > 1) {
+      const lastCol = sheet.getLastColumn();
+      const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+      let colImg = headers.indexOf('Image URL');
+      if (colImg === -1) colImg = headers.indexOf('Image Link');
+      const colTs = headers.indexOf('Timestamp');
+      const colPo = headers.indexOf('PO No.');
+      if (colImg !== -1 && colTs !== -1) {
+        const targetTs = formatTimestampForCompare(payload.timestamp); // normalize ISO → เวลาไทย (บิลจาก Supabase timestamp เป็น ISO)
+        const targetPo = String(payload.po_number || '').trim();
+        let rowIndex = Number(payload.id) + 1;
+        let matched = false;
 
-    const lastCol = sheet.getLastColumn();
-    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-    let colImg = headers.indexOf('Image URL');
-    if (colImg === -1) colImg = headers.indexOf('Image Link');
-    const colTs = headers.indexOf('Timestamp');
-    const colPo = headers.indexOf('PO No.');
-    if (colImg === -1 || colTs === -1) return false;
-
-    const targetTs = formatTimestampForCompare(payload.timestamp); // normalize ISO → เวลาไทย (บิลจาก Supabase timestamp เป็น ISO)
-    const targetPo = String(payload.po_number || '').trim();
-    const fileId = extractDriveFileId(payload.image_url || '');
-    let rowIndex = Number(payload.id) + 1;
-    let matched = false;
-
-    if (rowIndex >= 2 && rowIndex <= sheet.getLastRow()) {
-      const ts = formatTimestampForCompare(sheet.getRange(rowIndex, colTs + 1).getValue());
-      const po = colPo !== -1 ? String(sheet.getRange(rowIndex, colPo + 1).getValue() || '').trim() : '';
-      if (ts === targetTs && po === targetPo) matched = true;
-    }
-    if (!matched) {
-      const all = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getValues();
-      for (let i = 0; i < all.length; i++) {
-        const ts = formatTimestampForCompare(all[i][colTs]);
-        const po = colPo !== -1 ? String(all[i][colPo] || '').trim() : '';
-        if (ts === targetTs && po === targetPo) { rowIndex = i + 2; matched = true; break; }
+        if (!isNaN(rowIndex) && rowIndex >= 2 && rowIndex <= sheet.getLastRow()) {
+          const ts = formatTimestampForCompare(sheet.getRange(rowIndex, colTs + 1).getValue());
+          const po = colPo !== -1 ? String(sheet.getRange(rowIndex, colPo + 1).getValue() || '').trim() : '';
+          if (ts === targetTs && po === targetPo) matched = true;
+        }
+        if (!matched) {
+          const all = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getValues();
+          for (let i = 0; i < all.length; i++) {
+            const ts = formatTimestampForCompare(all[i][colTs]);
+            const po = colPo !== -1 ? String(all[i][colPo] || '').trim() : '';
+            if (ts === targetTs && po === targetPo) { rowIndex = i + 2; matched = true; break; }
+          }
+        }
+        // จับคู่สุดท้ายแบบหนีไม่รอด: หาบรรทัดที่คอลัมน์รูปมี file ID ตัวเดียวกัน (กันพลาดกรณี timestamp/PO เปลี่ยนไป)
+        if (!matched && fileId) {
+          const all2 = sheet.getRange(2, colImg + 1, sheet.getLastRow() - 1, 1).getValues();
+          for (let i = 0; i < all2.length; i++) {
+            if (String(all2[i][0] || '').indexOf(fileId) !== -1) { rowIndex = i + 2; matched = true; break; }
+          }
+        }
+        if (matched) {
+          sheet.getRange(rowIndex, colImg + 1).setValue(newImageUrl);
+          sheetOk = true;
+          const colDocKey = headers.indexOf('Doc Key');
+          sheetDocKey = colDocKey !== -1 ? String(sheet.getRange(rowIndex, colDocKey + 1).getValue() || '').trim() : '';
+          writeLog('🖼️ IMAGE URL', 'อัปเดต URL รูปในชีตแถว ' + rowIndex + ' (ไฟล์ ' + fileId + ')');
+        } else {
+          // 🛡️ หาแถวชีตไม่เจอ (เช่น เซลล์เป็น HYPERLINK ที่ getValue ไม่ให้ URL) — ห้าม return false เงียบ ๆ เดิม
+          //     เพราะเดิมข้ามซิงก์ Supabase ด้วย → DB ยังเก็บ URL เก่า → ตาราง/ดูบิลเต็มโชว์รูปเก่า (แผงแก้ไขโหลดจากไฟล์ Drive ตรงจึงเห็นภาพใหม่)
+          writeLog('⚠️ IMAGE URL', 'หาแถวในชีตไม่เจอ (timestamp/PO/fileId) — ข้ามเขียนชีต แต่ซิงก์ Supabase ต่อด้านล่าง');
+        }
+      } else {
+        writeLog('⚠️ IMAGE URL', 'ชีตไม่มีคอลัมน์ Image URL/Timestamp — ข้ามเขียนชีต');
       }
+    } else {
+      writeLog('⚠️ IMAGE URL', 'ไม่พบชีตบิล/ชีตว่าง — ข้ามเขียนชีต');
     }
-    // จับคู่สุดท้ายแบบหนีไม่รอด: หาบรรทัดที่คอลัมน์รูปมี file ID ตัวเดียวกัน (กันพลาดกรณี timestamp/PO เปลี่ยนไป)
-    if (!matched && fileId) {
-      const all2 = sheet.getRange(2, colImg + 1, sheet.getLastRow() - 1, 1).getValues();
-      for (let i = 0; i < all2.length; i++) {
-        if (String(all2[i][0] || '').indexOf(fileId) !== -1) { rowIndex = i + 2; matched = true; break; }
-      }
-    }
-    if (!matched) return false;
 
-    sheet.getRange(rowIndex, colImg + 1).setValue(newImageUrl);
-
-    // Sync URL รูปใหม่ลง Supabase ด้วย (แหล่งข้อมูลหลักของหน้าเว็บ) — พยายามเต็มที่
+    // 🛡️ Sync Supabase แยกอิสระจากชีต: doc_key จาก payload (frontend ส่งมา) → doc_key จากชีต → google_drive_file_id (ตัวสำรอง)
     try {
-      const colDocKey = headers.indexOf('Doc Key');
-      const docKey = colDocKey !== -1 ? String(sheet.getRange(rowIndex, colDocKey + 1).getValue() || '').trim() : '';
-      if (docKey) {
-        supabaseRequest('patch', '/rest/v1/receipts?doc_key=eq.' + encodeURIComponent(docKey), {
+      const sbKey = String(payload.doc_key || '').trim() || sheetDocKey;
+      let sbRes = null;
+      if (sbKey) {
+        sbRes = supabaseRequest('patch', '/rest/v1/receipts?doc_key=eq.' + encodeURIComponent(sbKey), {
           image_url: newImageUrl,
-          google_drive_file_id: extractDriveFileId(newImageUrl) || null
-        });
+          google_drive_file_id: fileId || null
+        }, 'return=representation');
+        writeLog('🖼️ IMAGE URL', 'ซิงก์ Supabase (doc_key=' + sbKey + ') โดน ' + (Array.isArray(sbRes) ? sbRes.length : '?') + ' แถว');
+      } else if (fileId) {
+        sbRes = supabaseRequest('patch', '/rest/v1/receipts?google_drive_file_id=eq.' + encodeURIComponent(fileId), {
+          image_url: newImageUrl,
+          google_drive_file_id: fileId
+        }, 'return=representation');
+        writeLog('🖼️ IMAGE URL', 'ซิงก์ Supabase (google_drive_file_id=' + fileId + ') โดน ' + (Array.isArray(sbRes) ? sbRes.length : '?') + ' แถว');
+      } else {
+        writeLog('⚠️ IMAGE URL', 'ไม่มีตัวตน (doc_key/fileId) สำหรับซิงก์ Supabase — รูปในตารางอาจยังเป็น URL เก่า');
       }
+      if (Array.isArray(sbRes) && sbRes.length === 0) writeLog('⚠️ SUPABASE', 'updateReceiptImageUrl: patch ไม่โดนแถวเลย — ตรวจ doc_key/google_drive_file_id ใน Supabase');
     } catch (sbErr) {
       writeLog('⚠️ SUPABASE', 'updateReceiptImageUrl sync ล้มเหลว: ' + sbErr.toString());
     }
-    return true;
+    return sheetOk;
   } catch (e) {
+    writeLog('❌ ERROR', 'updateReceiptImageUrl: ' + e.toString());
     return false;
   }
 }
@@ -5968,7 +5858,7 @@ function upsertReceiptLink(payload) {
   const linkType = receiptDocTypeByKey(linkKey);
   const poType = receiptDocTypeByKey(poKey);
   if (isScaleLikeDocTypeForLink(linkType) && poType === 'ใบสั่งซื้อ') {
-    return { success: false, code: 'SCALE_PO_FORBIDDEN', message: 'ใบชั่งต้องจับคู่กับใบส่งของเท่านั้น (โซ่ 3 ขั้น: PO → ใบส่งของ → ใบชั่ง) — ไม่สามารถจับใบชั่งติดใบสั่งซื้อโดยตรงได้' };
+    return { success: false, code: 'SCALE_PO_FORBIDDEN', message: 'ใบชั่งน้ำหนักต้องจับคู่กับใบส่งของเท่านั้น (โซ่ 3 ขั้น: PO → ใบส่งของ → ใบชั่งน้ำหนัก) — ไม่สามารถจับใบชั่งน้ำหนักติดใบสั่งซื้อโดยตรงได้' };
   }
   const wantConfirmed = !!(payload && payload.status === 'confirmed');
   const body = {
@@ -6009,7 +5899,7 @@ function setReceiptLinkStatus(payload) {
   const linkType = receiptDocTypeByKey(linkKey);
   const poType = receiptDocTypeByKey(poKey);
   if (isScaleLikeDocTypeForLink(linkType) && poType === 'ใบสั่งซื้อ') {
-    return { success: false, code: 'SCALE_PO_FORBIDDEN', message: 'ลิงก์นี้เป็น "ใบชั่งติด PO ตรง" ซึ่งไม่ตรงตามโซ่ 3 ขั้น (PO → ใบส่งของ → ใบชั่ง) — ให้ลบออก แล้วจับใบชั่งกับใบส่งของแทน' };
+    return { success: false, code: 'SCALE_PO_FORBIDDEN', message: 'ลิงก์นี้เป็น "ใบชั่งน้ำหนักติด PO ตรง" ซึ่งไม่ตรงตามโซ่ 3 ขั้น (PO → ใบส่งของ → ใบชั่งน้ำหนัก) — ให้ลบออก แล้วจับใบชั่งน้ำหนักกับใบส่งของแทน' };
   }
   const wantConfirmed = !!(payload && payload.status === 'confirmed');
   const body = { status: wantConfirmed ? 'confirmed' : 'pending', confirmed_at: wantConfirmed ? new Date().toISOString() : null };
@@ -6294,6 +6184,8 @@ function handleApiRequest(fn, payload, token, origin) {
     try {
     switch (safeFn) {
       case 'getReceiptData':        return fetchReceiptsFromSupabase();
+      case 'getSingleReceipt':      return getSingleReceipt(safePayload || {});
+      case 'getEditFieldSuggestions': return getEditFieldSuggestions();
       case 'deleteReceipt':         return deleteReceipt(safePayload || {});
       case 'updateReceipt':         return updateReceipt(safePayload || {});
       case 'getReceiptImageData':   return getReceiptImageData(safePayload || {});
@@ -6310,19 +6202,9 @@ function handleApiRequest(fn, payload, token, origin) {
       case 'removeReceiptLink':     return removeReceiptLink(safePayload || {});
       case 'reanalyzeReceipt':      return reanalyzeReceipt(safePayload || {});
       case 'applyReanalyzedData':   return applyReanalyzedData(safePayload || {});
-      // AI Template Library (Phase 1)
-      case 'getAITemplates':      return getAITemplates(safePayload || {});
-      case 'confirmTemplate':     return confirmTemplate(safePayload && safePayload.templateId, safePayload && safePayload.groundTruth, safePayload && safePayload.docType, safePayload && safePayload.userEmail);
-      case 'deleteTemplate':      return deleteTemplate(safePayload && safePayload.templateId);
-      // AI Prompt Sets (Phase 2 — ชุด prompt AI ต่อประเภท)
+      // AI Template Library (Phase 1)      // AI Prompt Sets (Phase 2 — ชุด prompt AI ต่อประเภท)
       case 'ensureStandardPromptSets': return ensureStandardPromptSets();
-      case 'getAIPrompts':        return getAIPrompts();
-      case 'getAISamples':        return getAISamples(safePayload || {});
-      case 'updateAISampleClassification': return updateAISampleClassification(safePayload || {});
-      case 'createCustomPromptSet': return createCustomPromptSet(safePayload && safePayload.title);
-      case 'attachTemplateToPrompt': return attachTemplateToPrompt(safePayload && safePayload.templateId, safePayload && safePayload.docType);
-      case 'uploadLocalSample':   return uploadLocalSample(safePayload && safePayload.docType, safePayload && safePayload.fileName, safePayload && safePayload.blobBase64, safePayload && safePayload.mime);
-      case 'generateAIPrompt':    return generateAIPrompt(safePayload && safePayload.docType);
+      case 'getAIPrompts':        return getAIPrompts();      case 'createCustomPromptSet': return createCustomPromptSet(safePayload && safePayload.title);      case 'generateAIPrompt':    return generateAIPrompt(safePayload && safePayload.docType);
       case 'updateAIPromptFields': return updateAIPromptFields(safePayload || {});
       case 'deletePromptSet':     return deletePromptSet(safePayload && safePayload.promptId);
       case 'recordFeedback':      return recordFeedback(safePayload && safePayload.actionType, safePayload && safePayload.docKey, safePayload && safePayload.storeName, safePayload && safePayload.fieldName, safePayload && safePayload.originalValue, safePayload && safePayload.correctedValue, safePayload && safePayload.extra);
@@ -6550,3 +6432,5 @@ function parseQueryString(queryString) {
   }
   return params;
 }
+
+

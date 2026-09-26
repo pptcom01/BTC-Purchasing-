@@ -180,6 +180,7 @@ VALUES
   ('หนังสือรับรองการหักภาษี ณ ที่จ่าย (50 ทวิ)', 'WHT', 'Tax & Receipts', 'หลักฐานภาษีหัก ณ ที่จ่าย ไม่ใช่เครดิตภาษีซื้อ VAT', 'ประมวลรัษฎากร ม.50 ทวิ', ARRAY['50 ทวิ','Withholding Tax Certificate'], false, true, true, 60),
   ('ใบส่งของ/ใบกำกับภาษี', 'DO/TAX', 'Delivery & Site Operations', 'พิจารณาเครดิตภาษีซื้อได้เมื่อส่วนใบกำกับภาษีถูกต้องครบถ้วน', 'ประมวลรัษฎากร ม.86/4', ARRAY['Delivery Order / Tax Invoice'], false, true, true, 70),
   ('ใบส่งของ', 'DO', 'Delivery & Site Operations', 'หลักฐานส่งมอบ ไม่ใช่เครดิตภาษีซื้อ VAT โดยลำพัง', NULL, ARRAY['Delivery Order','Delivery Note'], false, true, true, 80),
+  ('ใบส่งของ/ใบแจ้งหนี้', 'DO/INV', 'Delivery & Site Operations', 'เอกสารฉบับเดียวเป็นทั้งหลักฐานส่งมอบและเรียกเก็บเงิน ต้องติดตามหลักฐานภาษี/รับชำระประกอบ', NULL, ARRAY['Delivery Order / Invoice','ใบส่งของ/ใบวางบิล'], false, true, true, 85),
   ('ใบชั่ง', 'WT', 'Delivery & Site Operations', 'หลักฐานน้ำหนักหน้างาน ไม่ใช่เครดิตภาษีซื้อ VAT', NULL, ARRAY['Weight Ticket','Weighbridge'], true, true, true, 90),
   ('ใบตรวจรับพัสดุ/งานจ้าง', 'WR', 'Delivery & Site Operations', 'หลักฐานตรวจรับภายใน ไม่ใช่เครดิตภาษีซื้อ VAT โดยลำพัง', NULL, ARRAY['Work Acceptance Report','ใบรับมอบงาน'], false, true, true, 100),
   ('ใบสั่งซื้อ', 'PO', 'Purchasing & Commercial', 'เอกสารสั่งซื้อ ไม่ใช่เครดิตภาษีซื้อ VAT', NULL, ARRAY['Purchase Order','P.O.'], false, true, true, 110),

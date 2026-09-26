@@ -2,13 +2,35 @@
   "project": "BTC Purchasing Receipts (ระบบสแกนบิลจัดซื้อผ่าน LINE + Gemini + Sheets + Supabase)",
   "reset_date": "2026-09-22",
   "note": "RESET FRESH — User สั่งล้าง handoff/log เก่าทั้งหมด + ยกเลิกแผนแยกไฟล์ + จัดโครงสร้างไฟล์แบบราบ 2026-09-22. งานล่าสุด (2026-09-22): 1) Target Architecture A/B/C/D — DB ครบ + TR backfill (counter 349) + variance 2) 🆓 ตามคำสั่ง User 'ใช้รุ่นฟรีเป็นหลัก': ตัด pro ออก, ล็อก flash-lite เป็นตัวหลัก (score 70>50), fallback = flash-lite นำ, + analyzeReceiptSmart เรียก AI รอบ 2 ต่อเมื่อผลรอบ 1 ไม่ชัดพอ (confidence<85/ไม่ clear) → เหลือ 1 คำขอ/ใบ ลดติดโควตาฟรี 3) Flex 2 แบบ '✅ บันทึกบิลแล้ว' + '⚠️ บิลนี้มีในระบบแล้ว' (giga, TR ใหญ่) ใช้ STEP 2-DUP/STEP 5-SKIP/บันทึกสำเร็จ 4) 🔴 LINE HTTP 429 'monthly limit' — โควตาส่งข้อความรายเดือนหมด (ไม่ใช่โค้ด แต่บรรเทาได้ด้วยข้อ 7) 5) ปัญหา recurring: binary รันจริง ≠ ไฟล์เครื่อง (log 16:04 ยังเป็น gemini-3.8-flash ตัวแรก + EXHAUSTED วน) = deploy ยังไม่โดนทุกครั้ง 6) MD5 backfill บิลเก่า (ภารกิจรอง) 7) 🔓 โหมด reply-first (ตอบกลับข้ามโควตา push): จาก log จริง reply=200/push=429 → เพิ่ม REPLY_ONLY_MODE (default true): งดแจ้ง 'กำลังอ่านบิล' แล้วส่งผลสรุปบิล (Flex บันทึกแล้ว/บิลซ้ำ) ด้วย reply ก่อนเสมอ (sendResultMessages) สำรองเป็น push ถ้า reply ไม่ผ่าน — เส้นทางคิวไม่มีโทเคนใช้ push เหมือนเดิม 8) 🎨 ปรับตารางบิลหน้าเว็บให้เป็นรูปแบบ Demo ที่ User ให้ศึกษา (3-Way Matching อันเดิมที่มีแล้ว แต่มองว่าตารางบิลวุ่นวาย/จับคู่ไม่ชัด): ทุกแถวโชว์บทบาทโซ่ (Master PO/ใบชั่ง BULK/ใบส่งของ·ใบรับของ/บิลอื่น) + สถานะจับคู่จาก receipt_links จริง (ยังไม่จับ/รอตรวจสอบ/จับคู่แล้ว↗PO + match score) + ยางธง ⚖️ + เพิ่ม dropdown matchStatusFilter/matchRoleFilter — ทั้ง ตาราง/การ์ด/แท็บจับคู่แล้ว (index.html เท่านั้น, ไม่แตะ backend/SQL) 9) ⛰️ (ต่อจากข้อ 8) User ส่งไฟล์ C:/Users/PC/OneDrive/Desktop/ทดสอบ.html (demo 3-Way เต็มรูปแบบ React mock) ย้ำว่า UI ต้องการตารางที่เหมือน → เพิ่มหน้าใหม่ใน sidebar 'ตรวจวางบิล 3-Way' (data-page='3way') port UI demo เป็น vanilla JS เชื่อมข้อมูลจริง: 5 KPI + 3 แท็บ BULK(ตาราง 4 ส่วน PO/DO/Ticket/Audit + โหมดคิดเงิน DO/Ticket + สถานะสี) / UNIT(3 ส่วน เทียบ qty) / ORPHAN(9 คอลัมน์ + แนะนำ PO จากร้านค้าตรงกัน) + build3WayData ดึง chain ใบชั่งต่อจาก DO (ไม่ใช้ติด PO ตรง) + สถานะจาก weight_variances/diff ±0.5% จริง — index.html เท่านั้น ตรวจผ่าน mock test/SYNTAX-OK 10) 🐛 (ต่อข้อ 9) User รายงานหน้า 3-Way แสดง 'โหลดข้อมูลไม่สำเร็จ' → harness จำลองข้อมูลจริงพบ ReferenceError 'up is not defined' ใน build3WayData แขนง UNIT (ใช้ up ที่ประกาศแค่ในแขนง BULK) → แก้ด้วย `const up_u = firstUnitPrice(it)` ครอบเฉพาะแขนง UNIT แล้ว (pricePerUnit/totalAmount) — RENDERERS-OK + SYNTAX-OK, รอ User redeploy index.html",
-  "status": "phase-2.8-inline-image-edit-in-edit-modal-done(v3.14.4)",
+  "status": "v3.21.6-standard-doc-type-DO-INV-ใบส่งของใบแจ้งหนี้",
+  "last_task_2026_09_25f": "🧾 v3.21.6 ตามคำสั่ง User 'เอกสารสำหรับ AI จะไม่มีประเภทเอกสาร ใบส่งของ / ใบแจ้งหนี้' — เพิ่มประเภทมาตรฐานรวม 'ใบส่งของ/ใบแจ้งหนี้' (DO/INV, หมวด Delivery & Site Operations, money_doc=true + delivery/billing_document=true): Code.gs = DOC_KNOWLEDGE_BASE KB ใหม่ + buildStandardFieldConfig (po_number/ref_no เปิด, tax_invoice_no ปิด) + buildStandardPromptText focus + normalizeDocType pattern /ส่งของ.*(แจ้งหนี้|วางบิล)/ แทรกก่อน pattern เดิม (ทดสอบ 6 เคสผ่าน ไม่กลืน DO/INV-BILL/DO-TAX) + classifyDocumentType เพิ่มรหัส DELIVERY_INVOICE_BILLING + buildUniversalOcrPrompt/adaptUniversalOcrResult typeMap | index.html = ACCOUNTING_DOC_TYPES + getAccountingDocTypeLoose + editDocTypeSelect option + Matrix po_number/items/total_amount='M' | supabase_setup_all.sql = seed doc_types sort_order=85 aliases [Delivery Order / Invoice, ใบส่งของ/ใบวางบิล] | บิลเก่าไม่ migrate | Check: node --check EXIT=0, script index OK, FFFD=0 | ⚠️ REDEPLOY BOTH Code.gs + index.html (SQL เมื่อต้องการ seed ใหม่)",
+  "last_task_2026_09_25d": "🪟 v3.20.5-7 ตามคำสั่ง User 'ตอนกดแก้ไขข้อมูล & รูปภาพ ละย้าย... ทำไมต้องสลับหน้าตาไปมา' — (1) 🚨 แก้โครงหน้าต่างแก้ไขพัง: ต้นตอ = `</div>` ปิดคอลัมน์ซ้ายเร็วเกินไป → แผงเครื่องมือแก้ไขรูป (bg-white border-t p-2.5) หลุดเป็น flex sibling ทำให้ฟอร์มขวาถูกบีบเหลือ ~577px และแผงเครื่องมือยืดเต็มความสูง (วัดจากพรีวิวจริง) + ปุ่มซูมลอยเกาะขอบ modal → แก้: ย้าย `</div>` ไปหลังแผงเครื่องมือ + ย้ายปุ่มซูมเข้าในเวทีรูป (2) 🪟 หน้าต่างเดียว 2 โหมด: mergeEditPaneIntoDetail() ย้ายแผงแก้ไขเข้ามาเป็นแผงที่สองของ #detailModal ตั้งแต่โหลดหน้า แล้วลบกล่อง #editModal ทิ้ง (ID/ปุ่มเดิมครบ) + setDetailMode('view'|'edit') สลับแผง+ชุดปุ่มบนแถบหัวเดียวกัน (ป้ายโหมด/Matrix Code ตำแหน่งเดิม, ซ่อนแท็บข้อมูล/จับคู่ในโหมดแก้ไข) — ปุ่มแก้ไข = สลับโหมดในหน้าต่างเดิม, ยกเลิก = กลับโหมดดู, บันทึกสำเร็จ = วาดค่าล่าสุดลงแผงดูทันที (3) 🎨 ปรับหน้าตาโหมดแก้ไขให้เหมือนโหมดดู: คอลัมน์ซ้าย 42% สี/ขอบเดียวกัน, แถบหัวคอลัมน์รูป/แผงเครื่องมือใช้หัวข้อเดียวกัน, เลิกการ์ด light-panel 4 หมวด (พืนเรียบแบบ SECTION) (4) 🔄 'อ่านใหม่ (AI)' ย้ายมาอยู่แถบหัวหน้าต่างเดียว (เห็นเฉพาะโหมดแก้ไข) → emReanalyzeIntoForm ผู้ใช้กดแล้ว AI อ่านรูปใหม่แล้ว emFillFormFromAi เติมค่าลงช่องกรอก (ค่าว่าง = คงค่าเดิม + ไฮไลต์ช่องที่เปลี่ยน 8 วิ) | Check: node --check EXIT=0, FFFD=0, ID ไม่ซ้ำ, div บาลานซ์, ทดสอบกดจริงในพรีวิวผ่าน | badge v3.20.7 | ⚠️ REDEPLOY index.html อย่างเดียว",
+  "last_task_2026_09_25e": "🪟 v3.21.0 ตามคำสั่ง User 'ให้ใช้โหมดดูข้อมูลเลย เมื่อกดแก้ไข แค่เปลี่ยนให้มันเป็นฟิลด์ที่แก้ได้ ไม่ต้องสลับโหมดดูข้อมูลกับโหมดแก้ไขข้อมูล' — (1) เลิกสลับแผง/สลับหน้าตา: โครงที่แสดงตลอดคือแผงดูข้อมูล (รูป 42% ซ้าย + การ์ดข้อมูล 58% ขวา) (2) mergeEditPaneIntoDetail()→mountEditControlsIntoView(): ย้าย (ไม่คัดลอก/ไม่สร้าง ID ซ้ำ) ช่องกรอก/สเตจ canvas + กรอบครอป/ตารางรายการแก้ไข/ปุ่มเพิ่มรายการ/กล่องยอดรวม จาก #editModal มาวางทับ (ตำแหน่งเดิมของช่องข้อมูล) ในแผงดูข้อมูล แล้ว .remove() กล่องเดิม — ติดป้าย .mode-view (ค่าเดิม) / .mode-edit (ช่องกรอก) (3) CSS 2 บรรทัด: #detailModal.mode-edit .mode-view + #detailModal:not(.mode-edit) .mode-edit → display:none !important (ไม่ทับ .hidden ตามเงื่อนไข) (4) setDetailMode(): สลับแค่ class mode-edit + ป้ายโหมด/ชุดปุ่มเดิม + showDetailTab('info') ตอนแก้ + fit ซูมรูปตอนกลับ (5) Cascading: toggleScaleFields→ซิงก์ modalScaleInfo, applyEditDocTypeVisibility→ซิงก์ modalPoFields, closeModal→setDetailMode('view') (6) 🐛 แก้บั๊กเจอระหว่างทาง: openDetailItem เขียน modalPoStoreName ที่ไม่มีใน markup → TypeError ทำเปิดบิล PO ไม่ขึ้น (null-guard) | Check: syntax EXIT=0, FFFD=0, ID ซ้ำ=0, ID ที่ mound อ้าง 33/33 มีจริง, พรีวิวสลับโหมด 3 รอบ count .mode-view=24/.mode-edit=33 คงที่ + ตรวจด้วยตา 3 ตัวอย่าง (ภาษี/PO/ใบชั่ง) (7) 🧩 ยุบการ์ดข้อมูลซ้ำตามคำสั่ง User 'ลูกค้า / บริษัท / ผู้เบิก ก็คือชื่อบริษัท (ผู้สั่งซื้อ) ทำไมต้องมี 🏢/🚧/🙋/💳 แยกอีกละ': ลบการ์ด #modalPoFields ทั้งใบ แล้วย้ายช่อง 4 ตัว (บริษัท/งาน/ผู้เบิก/ผู้สั่งจ่าย) ไปในการ์ด 'ลูกค้า / บริษัท / ผู้เบิก' (พร้อมป้ายกำกับ) — ลบ ID ที่ไม่ใช้ (modalBuyer*/modalPoStoreName) + ลบ logic ซ่อน/โชว์การ์ด + ลบซิงก์ applyEditDocTypeVisibility + เปลี่ยนหัวการ์ดเป็น 'ชื่อบริษัท (ผู้สั่งซื้อ)' ตามคำสั่ง User ต่อมา (ตัดป้าย 🏢 ที่ซ้ำหัวการ์ดออก, ชื่อบริษัทเป็นบรรทัดหลักใต้หัวการ์ด, งาน/โครงการเต็มแถว, ผู้เบิก|ผู้สั่งจ่าย); (9) 🧹 แก้เลย์เอาท์ 'ข้อมูลหลักเอกสาร' ในโหมดแก้ (User 'เลย์เอาท์มั่วมาก'): เลิกยกกล่องฟอร์มที่มีขอบ+ป้ายซ้ำมาทั้งกล่อง เปลี่ยน moveIntoNewCell()→labelCell(label, anchor, input) ที่สร้างช่องแบบโหมดดูข้อมูล (ป้าย text-[11px] + ui-input) แล้วย้ายแค่ input; เลขอ้างอิงต่อท้ายป้ายเดิม / เล่มที่+ชื่อเรียกเลขอ้างอิงต่อท้ายกริดแถวสุดท้าย / กำกับภาษี+เลขที่ PO มีกรอกเสมอในโหมดแก้ (เดิมซ่อนทั้งช่องเมื่อว่าง → เติมทีหลังไม่ได้) | วัดพรีวิว: 4 คอลัมน์เท่ากัน 161.99px ทุกช่องสูงเท่ากัน 58/58/54px; (10) 🖇️ จัดกริด 'ข้อมูลหลักเอกสาร' ใหม่เป็น 2 คอลัมน์ตามที่ User ระบุ (ซ้าย เลขที่รายการระบบ/ประเภท/หมวดหมู่/ผู้ส่งบิล/แหล่งที่มา — ขวา วันที่/เลขที่เอกสาร/PO/อ้างอิง/กำกับภาษี) ด้วยกล่องรวม space-y-4 + 5 แถว grid sm:grid-cols-2 (จับคู่ซ้าย|ขวา = ป้ายตรงกันทุกแถว; เดิม 2 stack อิสระเลยไม่ตรงกัน) + เล่มที่/ชื่อเรียกเลขอ้างอิง เปลี่ยนเป็นช่องย่อย (subField) ในช่องที่เกี่ยวข้อง + ย้ายจุดเกาะกล่องเพิ่มประเภทเอกสารจาก closest('div.grid') → closest('div.space-y-4') ; (11) 🐎 v3.21.3 แถบหัวสองฝั่งสูงไม่เท่ากัน (User แจ้ง) — วัดจริง ซ้าย 55px / ขวา 95px เพราะ flex-wrap ขึ้นบรรทัด 2 → ล็อก lg:h-14 + lg:py-0 + lg:flex-nowrap ทั้งสองแถบ, shrink-0 ของในแถบ, 'Matrix Code:' โชว์เฉพาะ xl, คำอธิบายแท็บจับคู่ xl:flex + truncate max-w-[200px], ย้าย editOriginInfo2 ไปแถบ amber ใต้แถบหัว (.mode-edit) | ⚠️ สำคัญ: คลาสที่ใช้หลายตัวไม่มีใน CSS บิลด์ (lg:h-14, lg:py-0, lg:flex-nowrap, sm:flex, xl:inline/flex, gap-x-6, gap-y-4/5, border-amber-100, max-w-[220px]) → เติมเองท้ายสไตล์ก้อนที่ 2; ตรวจ: 1265px 56/56, 1025px 56/56 ไม่ clip, 1441px 56/56, 390px ซ้อนแนวตั้งปกติ | badge v3.21.0 | ⚠️ REDEPLOY index.html อย่างเดียว; #editModal ยังต้องเก็บไว้เป็นต้นทางของช่องกรอก (ถูก remove ทุกครั้งตอนโหลดหน้า)",
+  "last_task_2026_09_25c": "🔢 v3.20.4 ตามคำสั่ง User 'ส่วน ข้อมูลหลักเอกสาร: เรียงข้อมูลตามความสำคัญ' — SECTION 1 ของ #detailModal: ยุบ 2 กริดเป็นกริดเดียว grid-cols-2 md:grid-cols-4 gap-4 และเรียงลำดับใหม่ตามความสำคัญ = 1) ประเภทเอกสาร 2) เลขที่เอกสาร 3) วันที่เอกสาร 4) เลขใบกำกับภาษี 5) เลขที่ PO 6) เลขอ้างอิง 7) หมวดหมู่ 8) เลขที่รายการระบบ 9) ผู้ส่งบิล (LINE) 10) แหล่งที่มา (เหตุผล: ตัวตนเอกสาร → เลขที่ใช้ทางบัญชี/จับคู่ → เลขอ้างอิง → การจำแนก → รหัสระบบ → ข้อมูลตรวจสอบย้อนหลัง) | ช่องซ่อนตามประเภทเอกสาร (modalTaxInvBox/modalPoRowBlock) = display:none ไม่กินช่อง กริดไหลเอง | ID 16/16 ครบ JS ไม่แตะ | badge v3.20.3→v3.20.4 | Check: node --check EXIT=0, FFFD=0, ลำดับ DOM ตรง | ⚠️ REDEPLOY index.html อย่างเดียว",
+  "last_task_2026_09_25b": "🧹 v3.20.3 ตามคำสั่ง User 'ส่วนแสดง ข้อมูลหลักเอกสาร: ไม่เอาแบบการ์ด' — SECTION 1 ของ #detailModal ใน index.html เลิกเป็นกล่องการ์ดทั้งหมด: (1) กรอบการ์ดรอบนอก (bg-white rounded-xl p-5 border shadow-sm) → space-y-4 (2) กล่องรายช่อง 8 + กล่องเขียว/ฟ้า (modalTaxInvBox/modalPoRowBlock) → min-w-0 เพียว: label เทา 11px + ค่าตัวหนา ในกริด grid-cols-2 md:grid-cols-4 gap-4 (gap-3.5 เดิมเป็นคลาสที่ไม่มีใน CSS) (3) หัวข้อตัดชิปไอคอนออก + เส้นคั่น pb-2 border-slate-200 (4) เก็บสีเดิม: ใบกำกับภาษีเขียว / PO ฟ้า / ผู้ส่งบิลไอคอนคน — แค่เลิกใส่กล่อง | ID ครบ 16/16 JS เดิมทำงานเหมือนเดิม | badge v3.20.2→v3.20.3 | Check: node --check EXIT=0, FFFD=0 | ⚠️ REDEPLOY index.html อย่างเดียว (Code.gs/SQL ไม่แตะ)",
+  "last_task_2026_09_25": "🔍 v3.20.2 ตามคำสั่ง User 'ดูโหมด ดูบิลเต็ม' — (1) เปิดดูหน้าต่างดูบิลเต็มโดยไม่ต้อง deploy: ไฟล์ใหม่ tmp_build_detail_preview.js ดึง <style> 3 ก้อน + markup #detailModal จาก index.html จริง (ไม่คัดลอกมือ) → preview_detail_modal.html + tmp_preview_detail_mock.js (mock 3 ตัวอย่าง: ใบกำกับภาษี/ใบสั่งซื้อ/ใบชั่งน้ำหนัก สลับได้ + รูปบิลวาดด้วย canvas + ซูม/หมุน/พลิก/ความสว่าง-คมชัด/แท็บจับคู่/การ์ดข้อมูลดิบ 1:1) — รันซ้ำได้ทุกครั้งหลังแก้ index.html (2) 🐛 เจอบั๊กจริงจากพรีวิว: ป้ายที่ JS สั่งซ่อน (.hidden) โชว์ค้างตลอด เพราะ .ui-badge{display:inline-flex} อยู่ใน <style id=\"ui-standard\"> ซึ่งมาทีหลัง .hidden{display:none} ของ tailwind-build → กระทบ modalDateFallbackBadge (วันที่รอตรวจ) + modalDocTitleGuess (AI เดาจากองค์ประกอบใบ) ในดูบิลเต็ม, ตัวนับรอตรวจบนแท็บบิล 3 ตัว, aiTemplateBadge → แก้ด้วย append `.ui-badge.hidden,.ui-tab.hidden{display:none !important}` ท้ายสไตล์ก้อนที่ 2 (badge v3.20.0→v3.20.2) | Check: node --check ทั้งไฟล์ผ่าน, FFFD=0 | ⚠️ REDEPLOY index.html อย่างเดียว (Code.gs/SQL ไม่แตะ) (3) ⚠️ ค้างตัดสินใจ: markup v3.20.0 ยังใช้ Tailwind class ที่ไม่มีใน CSS 24 ตัว (shadow-xl, bg-slate-200/60, opacity-20, w-20, h-3, space-y-2.5/3.5, gap-3.5, break-words, text-purple-700, md:p-6, disabled:opacity-50, active:cursor-grabbing ฯลฯ) — ทำให้หน้าดูบิลเต็มยังไม่ตรงตัวอย่าง Pro UI (พื้นสเตจโปร่งใส ไม่มีเงารูป) — ตัวสร้างพรีวิวรายงานรายชื่อให้ทุกครั้ง รอ User สั่งว่าต้องเติม CSS ให้ครบไหม",
   "ui_standard": {
     "phase": "Phase 1 (2026-09-23) — tokens + components วางแล้วใน index.html <style id=\"ui-standard\"> บรรทัด 76-153 (ปิด </style> ของเดิมที่ 73 ก่อนเสมอ — HTML parser อ่าน style ซ้อนไม่ได้ บทเรียนรอบนี้)",
     "phase2": "Phase 2 (2026-09-23) — ย้ายจุดจริง ~36 จุด: 4 activeCls→.ui-tab, ปุ่ม emerald-600→.ui-btn--primary, 19 badge→.ui-badge (+--scale), 4 หัวตาราง→.ui-th, 10 KPI→.ui-card",
     "phase2_5": "Phase 2.5 (2026-09-23) — User ทวนว่า 'ต้องการแบบเดิมทั้งหมด แต่มาตรฐานไปทางเดียวกันทุกเมนู + แก้ตัวอักษรขาว/กลืนพื้น ทั้งปุ่มทั้งข้อมูล': แก้บั๊กจริง 5 ชุด = (1) disabled save 2 ปุ่ม text-white บน slate-200 → conditional (2) .ui-btn--primary:disabled #94A3B8→#475569 (3) chip หัวโมเดล 5 เมนู รวมเป็น bg-btc-green solid สูตรเดียว (4) hover:bg-emerald-700 x2 → btc-green-hover (5) ย้อน mobile nav กลับ bg-btc-green แบบเดิม + READABILITY GUARD: input/select/textarea #1E293B, placeholder #64748B, option white",
     "phase2_6": "Phase 2.6 (2026-09-23) 🎯 ต้นตอ 'ตัวอักษรขาว/กลืนพื้น ทุกเมนูไม่เหมือนกัน' = Tailwind build เก่ากว่าโค้ด — diff-classes.js (ใช้จริง 502 vs มี CSS 420) → ขาดจริง 130 class: bg-blue-700/bg-amber-600/bg-emerald-600 (หัวตาราง 3-Way ส่วน1/2/3 → ขาวบนขาว) / bg-slate-200 (ปุ่ม disabled) / bg-blue-50,bg-indigo-50,bg-red-500,bg-sky-100,text-indigo-600 (KPI+ป้าย) / min-w-[1600px],shadow,p-5,pt-1,max-w-48,h-24 — แก้ด้วย CSS Tailwind v3 ครบ 130 rule (generator + palette hex จริง) append ต่อท้าย SUPPLEMENTARY + @keyframes pulse + @media sm/md/lg + badge v3.14.1",
     "phase2_8": "Phase 2.8 (2026-09-23) 🖼️ แผงแก้ไขรูปในหน้าต่าง 'แก้ไขข้อมูลบิล' — User ขอ 2 ครั้งว่าต้องแก้ไขรูปได้ 'พร้อมกันเลย': ฝัง canvas editModalCanvas + toolbar หมุนซ้าย/ขวา/พลิก/ความสว่าง/รีเซ็ต/บันทึกรูป ใช้พร้อมฟอร์มข้อมูล ไม่ต้องปิดหน้าต่าง | emLoadImageForEdit/emDraw/emRotate/emFlip/emSetBrightness/emReset/emSave/emApplySavedImage (บันทึกทับไฟล์เดิมผ่าน saveEditedReceiptImage ตัวเดิม) | openImageEditorFromEditModal ทนทุกมุมมองด้วย editModalItemRef(→allData→filteredData) | ลิงก์ครอป → ตัวแก้ไขเต็มรูปแบบเดิม | bump badge v3.14.3→v3.14.4 | ต้อง redeploy เฉพาะ index.html (Code.gs ไม่เปลี่ยน)",
+    "phase2_9": "Phase 2.9 (2026-09-23) 📋 จัดเลย์เอาต์ฟอร์มแก้ไขเป็นแบบเดียวกับ 'ดูบิลเต็ม': การ์ดบริษัทหัว (emerald โลโก้+ชื่อ+ที่อยู่+เลขภาษี+โทร+ป้าย) + กริดข้อมูลหลัก grid-cols-5 (เลขที่เอกสาร/PO/#เลขที่รายการระบบ อ่านอย่างเดียว / วันที่+หมวดหมู่ / ร้านค้า / ผู้ส่งบิล LINE อ่านอย่างเดียว / แหล่งที่มา อ่านอย่างเดียว) — ช่องหลักยังแก้ได้ทันที, ของเดิม (amber tip/ประเภทเอกสาร/บัญชี/ใบชั่ง/รายการ+ยอดรวม) ย้ายเป็นน้องร่วม, แก้คลอสซิ่งขวา-ล่าง 1 ชั้น + openEditModalItem เติม editSystemRecordNo/editSource/editSender (tooltip ID LINE) | bump badge v3.14.5 | REDEPLOY เฉพาะ index.html",
+    "phase2_10": "Phase 2.10 (2026-09-23, ปรับตาม User 2 รอบ) ✂️ ครอปในแผงแก้ไข + 🔍 ซูมเข้าออก 'บนรูปโดยตรง' (INLINE ไม่เปิดหน้าต่างใหม่): createInlineImageZoom(stage,el,opts) ใช้กับ detailImageStage/modalImage (ดูบิลเต็ม) + emImageStage/editModalCanvas (แก้ไขข้อมูลบิล) — wheel ซูมล็อคจุดเมาส์/ลากเลื่อน(เมื่อซูมเข้า)/dblclick+พอดีจอคืนขนาด | openDetailItem→fitNow บน load, emDraw→fitNow, โหมดครอปปิดซูม+คืนพอดีก่อนครอป | ลบ zoomModal/rv แรก, window.open=0 | bump v3.14.7",
+    "phase2_10b": "Phase 2.10b (2026-09-23) 🗑️ ลบปุ่ม 'แก้ไขรูปบิล' จากหน้าต่าง 'ดูบิลเต็ม' (openImageEditorFromDetail ถูกลบ — แก้รูปอยู่ในแผงแก้ไขของ 'แก้ไขข้อมูลบิล' อยู่แล้ว) + 🎯 บันทึกการแก้ไข = ปุ่มเดียว บันทึกทั้งรูป+ข้อมูล: emDirty flag (true บน emRotate/emFlip/emSetBrightness ที่เปลี่ยน/emApplyCrop, false ตอนโหลด/ปิด) → saveEditReceipt ถ้า emDirty ส่ง emSaveImage() (promise ห่อ saveEditedReceiptImage เดิม ผ่าน emRenderImageDataUrl) ก่อน แล้วค่อย updateReceipt + emApplySavedImage(ใหม่) ซิงก์หน้าจอทันที; ลบปุ่ม/ฟังก์ชัน emSave เดิมทิ้ง | badge v3.14.8 | REDEPLOY เฉพาะ index.html",
+    "phase2_10c": "Phase 2.10c (2026-09-23) 🐛 Hotfix Code.gs: ReferenceError: oldPo is not defined — `updateReceipt` เขียน log 'PO: ' + (oldPo||'-') ทั้งที่ oldPo ไม่เคยนิยาม → เพิ่ม `const colPoForLog = colIndex['PO No.']...; const oldPo = ...` (จับค่า PO เดิมก่อนเขียนทับ คู่กับ oldTotal เดิม) | เกิดเวลา 'บันทึกการแก้ไข' (ทั้งมี/ไม่มีรูป) → ตอนนี้บันทึกผ่านได้ | ⚠️ REDEPLOY BOTH Code.gs + index.html",
+    "phase2_10d": "Phase 2.10d (2026-09-23) 🔢 ให้ 'เลขที่รายการระบบ' (System Record No.) เป็นตัวตนหลักในการบันทึกแก้ไข (User ระบุ: เลขที่เอกสาร AI อ่านผิดบางครั้ง): updateReceipt ก่อนเขียนชีตจะ (1) ถ้าส่ง SRN มา → เทียบกับ SRN บนแถวจริง ถ้าไม่ตรง log ⚠️ SRN + ยึดค่าจากชีต (2) ถ้าไม่มี SRN ทั้งคู่ → กำหนดใหม่ผ่าน ensureSystemRecordNoForReceipt(doc_key) เขียนลงแถว + log 🔢 SRN → ครั้งถัดไปชี้ด้วย SRN ล้วนๆ (findReceiptRowByAny จับ SRN ก่อนอยู่แล้ว) | node --check Code.gs EXIT=0 | ⚠️ REDEPLOY Code.gs (+index.html)",
+    "phase2_10e": "Phase 2.10e (2026-09-23) 🖼️ แก้ไขรูปบิลต้อง 'เขียนทับภาพเดิม' ที่ URL เดิม (User ระบุ): saveEditedReceiptImage เปลี่ยนจากสร้างไฟล์ใหม่+trash → origFile.setBlob(blob) เขียนทับเนื้อหาไฟล์ Drive เดิม (file ID เดิม=URL เดิม) + setSharing; newImageUrl ยัง fileId เดิมแค่เพิ่ม v=<ts> กันแคชเบราว์เซอร์; updateReceiptImageUrl อัปเดตชีต/Supabase เหมือนเดิม | ⚠️ Drive thumbnail อาจค้างภาพเก่าชั่วครู่ ให้ F5 | frontend ไม่ต้องแก้ (emSaveImage/emApplySavedImage ใช้ URL ใหม่ได้) | node --check EXIT=0 (newFile=0 targetFolder=0 setBlob=1) | ⚠️ REDEPLOY Code.gs (+index.html)",
+    "phase2_10f": "Phase 2.10f (2026-09-23) 🛠️ Hotfix 'origFile.setBlob is not a function' (DriveApp.File ไม่มี setBlob): saveEditedReceiptImage เปลี่ยนเป็น (1) โหมดหลัก Drive.Files.update({},fileId,blob) ผ่าน Advanced Service Drive API → เขียนทับภาพเดิมในไฟล์เดิม (URL เดิม) (2) fallback ถ้ายังไม่เปิด Drive API → สร้างไฟล์ใหม่+trash เก่า (พฤติกรรมเดิม) + log เตือน | image_url=thumbnail?id=<fileIdเดิมหรือใหม่>&v=<ts> | frontend ไม่ต้องแก้ | node --check EXIT=0, ไม่มี .setBlob( คงเหลือจริง | ⚠️ USER ต้อง: เปิด Advanced Google Service 'Drive API' ในตัวแก้ไขสคริปต์ แล้ว REDEPLOY Code.gs → ทดสอบบันทึกรูป",
+    "phase2_10g": "Phase 2.10g (2026-09-23) ⚡ v3.14.9 รีเฟรชเฉพาะรายการที่แก้ไข (ไม่โหลดตารางใหม่ทั้งก้อน): (Backend) mapSheetRowToReceiptObject helper ใช้ร่วม getReceiptData/getSingleReceipt + getSingleReceipt(payload{srn,doc_key}) คืน 1 row + updateReceipt return เพิ่ม system_record_no+doc_key (Frontend) saveEditReceipt ใช้ refreshSingleReceipt(res,oldItemId,oldDocKey) แทน refreshData() → Supabase: query 1 row or GAS: getSingleReceipt → normalizeData → patchAllDataWith แทนใน allData รักษาตำแหน่ง/sort → lastDataSignature+applyFilters รีเรนเดอร์ทันที | fallback refreshData | badge v3.14.9 | ⚠️ REDEPLOY BOTH Code.gs + index.html",
+    "phase2_10h": "Phase 2.10h (2026-09-23) 🎯 CLASSIFICATION-FIRST AI: ให้ AI อ่านประเภทเอกสารจากภาพจริงก่อน (classifyDocumentType) → ดึง prompt เฉพาะประเภท → วิเคราะห์เต็มรูปแบบครั้งเดียว → รับประกัน 3 ฟิลด์บังคับ (ประเภทเอกสาร*, วันที่ในบิล*, เลขที่เอกสาร*) ผ่าน ensureRequiredFields | analyzeReceiptSmart เปลี่ยนจาก 2-pass เป็น classification-first | ⚠️ REDEPLOY Code.gs",
+    "phase2_10i": "Phase 2.10i (2026-09-23) 🎯 CLASSIFICATION-FIRST v2 — ยึดชื่อประเภทพิมพ์บนใบจริงเป็นลำดับแรก (User ย้ำ: อ่านจากภาพจริงก่อนเดา + ไม่มีชื่อบนใบค่อยดูแม่แบบ): (1) classifyDocumentType — ลำดับตัดสิน 3 ขั้น (ชื่อบนหัวใบจริงก่อน → ลักษณะเอกสาร → ไม่แน่ใจ=UNKNOWN) + คืน real_name/title_seen + รหัสครบ 17 มาตรฐาน + ฉีดประเภทองค์กร (2) ensureRequiredFields — ยึดใบจริงก่อน (doc_type_source=document/image_classification/none) + ลบการเติมวันที่=วันนี้ทิ้ง (อ่านไม่ได้='-' ให้ validate ตีกลับถ่ายใหม่) (3) analyzeReceiptSmart — ฉีดผลจำแนกเข้า extract + ตรวจขัดแย้ง 2 ขั้น (doc_type_conflict) (4) validateReceiptData 7.7 — ประเภทขัดแย้ง = ติดธงให้คนยืนยัน | node --check EXIT=0 | ⚠️ REDEPLOY Code.gs",
+    "phase2_10j": "Phase 2.10j (2026-09-23) 🐛 Hotfix จาก Log จริง 14:30-15:17: (1) Supabase HTTP 400 'invalid input syntax for type date: -' (RESYNC) — เพิ่ม normalizeSupabaseDateValue + normalizeSupabasePayloadDates (date/billing_date → null ถ้าอ่านไม่ได้, submitted_at → '-'=''→null) และ supabaseRequest normalize payload กลางจุดเดียวปิดทุกเส้นทาง + saveToSupabase/updateSupabaseReceipt/resyncReceiptsBetweenStores แก้จุดส่ง (2) ensureStandardPromptSets SyntaxError: Unexpected end of JSON input — ensureStandardPromptSet try/catch JSON.parse ทั้ง GET/POST (ว่าง=ไม่พบ/ข้าม) + ensureStandardPromptSets try/catch รายหมวด (หมวดพัง=ข้าม ไม่ตายทั้ง 17 หมวด) + getAIPrompts parse view กันว่าง (พัง=ชุดมาตรฐานสำรองในตัว) | node --check EXIT=0, FFFD=0 | ⚠️ REDEPLOY Code.gs",
+    "phase2_10k": "Phase 2.10k (2026-09-23) 🖼️ แก้รูป = เขียนทับไฟล์เดิมได้เองโดยไม่ต้องเปิด Advanced Service (User: ห้ามไฟล์ขยะ): ลำดับ 3 ชั้นใน saveEditedReceiptImage — (1) Advanced Service Drive.Files.update ถ้าเปิด (2) ใหม่ driveRestOverwriteFile_ = PATCH upload/drive/v3 ด้วย ScriptApp.getOAuthToken() ใช้ได้ทันที ไฟล์ ID/URL เดิม (3) fallback สุดท้ายสร้างใหม่ + ลบไฟล์เดิมถาวรทันที (driveRestDeleteFilePermanent_ DELETE ข้ามถังขยะ → ไม่ได้ค่อย setTrashed) + ส่งลิงก์ใหม่ | frontend ไม่แตะ (new_image_url เหมือนเดิม) | node --check EXIT=0 | ⚠️ REDEPLOY Code.gs",
+    "phase2_10l": "Phase 2.10l (2026-09-23) 🐛 Hotfix 'บันทึกแก้ไขสำเร็จแต่ตารางไม่เปลี่ยนตาม' (log 15:48-15:49): (1) handleApiRequest ลืม case 'getSingleReceipt' (สร้างไว้แต่ Phase 2.10g) → refreshSingleReceipt ตก fallback refreshData ทุกครั้ง — เพิ่ม dispatch แล้ว (2) updateSupabaseReceipt patch ด้วย SRN แล้วแถวใน Supabase ไม่มี SRN = โดน 0 แถวเงียบ ๆ (PostgREST 204 ว่าง) → เพิ่ม Prefer return=representation + retry ด้วย doc_key + self-heal SRN + log ⚠️ + return matched (3) updateReceipt แจ้งสถานะ sync จริงในข้อความบันทึก (matched=0 = ⚠️ patch ไม่โดนแถว) | frontend ไม่แตะ | node --check EXIT=0 | ⚠️ REDEPLOY Code.gs",
+    "phase2_10m": "Phase 2.10m (2026-09-23) 🖼️ Hotfix 'รูปในตาราง/ดูบิลเต็มเป็นรูปเก่า แต่แผงแก้ไขเห็นรูปใหม่': แผงแก้ไขโหลดสดจากไฟล์ Drive (getReceiptImageData) แต่ตารางใช้ URL จาก DB ซึ่ง updateReceiptImageUrl เดิม return false เงียบเมื่อหาแถวชีตไม่เจอ (เช่น Image URL เป็น HYPERLINK) แล้วข้ามซิงก์ Supabase ด้วย → (1) updateReceiptImageUrl รื้อ: หาแถวไม่เจอ=ข้ามเฉพาะชีตแล้วซิงก์ Supabase ต่อเสมอ + ตัวระบุ 3 ชั้น (doc_key payload → doc_key ชีต → google_drive_file_id) + Prefer representation + log จำนวนแถว (2) emSaveImage ส่ง doc_key/system_record_no ไปด้วย (3) refreshSingleReceipt รับ savedNewImageUrl เทียบ file ID กัน DB URL เก่าทับรูปสด | node --check EXIT=0 ทั้งคู่ | ⚠️ REDEPLOY BOTH Code.gs + index.html",
+    "phase3_1": "Phase 3.1 (2026-09-23) 💡 v3.15.0 ตัวเลือกช่องกรอกจากประวัติจริง (User: ลดภาระการคีย์ + กันสินค้าเดียวกันสะกดต่างกัน): (1) Code.gs getEditFieldSuggestions() — อ่าน receipts 2000 แถว → รวม+นับความถี่ 8 ฟิลด์ (สินค้า/หน่วย/ร้าน/ทะเบียน/บริษัท/งาน/ผู้เบิก/ผู้สั่งจ่าย) ตัด case/space ซ้ำ เลือกสะกดใช้บ่อยสุดเป็นตัวแทน เรียงใช้บ่อยก่อน + dispatch case (2) index.html — datalist 8 ชุด dynamic ผูกทุกช่องข้อความ (รวมแถวรายการสินค้า/หน่วยทุกแถว) + loadEditSuggestions โหลดครั้งเดียวแคชในหน้า ไม่บล็อกเปิดฟอร์ม | label โชว์ความถี่ (N ครั้ง) | badge v3.15.0 | node --check EXIT=0 ทั้งคู่ | ⚠️ REDEPLOY BOTH Code.gs + index.html",
+    "phase3_2": "Phase 3.2 (2026-09-23) 🎯 v3.15.1 ฟอร์มปรับตามประเภทเอกสาร (ดูบิลเต็ม+แก้ไขข้อมูลบิล นโยบายเดียวกัน, index.html เท่านั้น): (1) docTypeRelevantFieldKeys(type) นโยบายกลางจาก meta มาตรฐานบัญชี — T1/T2→เลขกำกับ+เล่ม+อ้างอิง, T3→อ้างอิง, T4/T5→เล่ม+อ้างอิง, D1/D2→อ้างอิง, O1/O2→การ์ดสั่งซื้อ/งาน (2) applyEditDocTypeVisibility คุมฟอร์มแก้ไข (editBookBox/editTaxInvoiceBox/editRefNoBox/editRefLabelBox/editPoFieldsCard/editScaleFields+customScaleDocTypes) — กฎเหล็ก: ช่องมีค่า=โชว์เสมอ เรียกหลังเติมค่าครบ+onchange dropdown+submitNewDocType (3) ดูบิลเต็ม: แถวเลข PO ซ่อนเมื่อว่าง (modalPoRowBlock) + การ์ดสั่งซื้อใช้ dtKeys.po แทน hardcoded + บรรทัด 'บันทึกเพิ่ม' (modalHiddenDocNos) เมื่อมีค่านอกช่องโชว์เด่น | index.html inline script node --check EXIT=0, FFFD=0 | ⚠️ REDEPLOY เฉพาะ index.html",
     "phase2_7": "Phase 2.7 (2026-09-23) 🔑 แก้ SESSION_EXPIRED ตอนบันทึกแก้ไข — สาเหตุ 2 ชั้น: (1) backend session 2 ชม. ไม่ต่ออายุ (apiSessionValid) → เพิ่ม SLIDING SESSION ต่ออายุอัตโนมัติเมื่อเหลือ <50% TTL (2) frontend catch เช็ค '&& !GAS_MODE' โหมด GAS จึงไม่เปิดล็อกอินใหม่ ผู้ใช้ตัน → เพิ่ม postLoginRetry + handleSessionExpired(label, retryFn) ใช้ 4 จุด (ลบบิล/บันทึกรูป/บันทึกแก้ไข/จับคู่) + loginSettings สำเร็จแล้วเรียกงานค้างต่ออัตโนมัติ + bump badge v3.14.2 — ต้อง redeploy BOTH Code.gs + index.html",
     "tokens": "--ui-brand=#27AE60 (LOCK: ห้าม bg-emerald-600 เป็น primary) / --ui-ok,pending,danger,info,role,muted / radius 3 ระดับ --ui-r-btn(.5rem)/--ui-r-card(.75rem)/--ui-r-pill / font 5 ระดับ --ui-fs-xs(11)/sm(12)/md(14)/lg(16)/xl(24)",
     "components": ".ui-btn(+--sm/--primary/--ghost/--danger) .ui-badge(--ok/--pending/--role/--muted/--danger/--info) .ui-card .ui-th .ui-tab(.is-active) .ui-input",
@@ -65,7 +87,9 @@
     "save_updateReceipt": "~5702",
     "reanalyzeReceipt_call": "~5793",
     "pages": "overview(KPI+กราฟ 2 ตัว) / table(3 แท็บ: บิลทั่วไป ใบสั่งซื้อ จับคู่แล้ว=กลุ่มโซ่ 3 ขั้น) / 3way(หน้าใหม่ ตรวจวางบิล 3-Way — BULK/UNIT/ORPHAN ตาราง 4 ส่วน PO/DO/Ticket + 5 KPI + โหมดคิดเงิน DO/Ticket) / วิเคราะห์ร้านค้า / ติดตามราคา / เอกสารสำหรับ AI / ตั้งค่า(ล็อกอิน session)",
-    "threeWay_page": "container page3Way หลัง </div><!-- /pageTable -->; sidebars: label(data-page='3way') ทั้ง desktop+mobile; switchPage: toggle 3way + render3WayView(); build3WayData (ดึง chain ใบชั่งต่อจาก DO); render3WayView/renderBulkTable/renderUnitTable/renderOrphanTable/compute3WayKpis/threeWayStatusChip/threeWayFilterRows/threeWaySwitchMode/threeWayOpenDoc/threeWayOpenMatch; helpers sumItemsQty/firstUnitPrice/fmtTons/fmtQty"
+    "threeWay_page": "container page3Way หลัง </div><!-- /pageTable -->; sidebars: label(data-page='3way') ทั้ง desktop+mobile; switchPage: toggle 3way + render3WayView(); build3WayData (ดึง chain ใบชั่งต่อจาก DO); render3WayView/renderBulkTable/renderUnitTable/renderOrphanTable/compute3WayKpis/threeWayStatusChip/threeWayFilterRows/threeWaySwitchMode/threeWayOpenDoc/threeWayOpenMatch; helpers sumItemsQty/firstUnitPrice/fmtTons/fmtQty",
+    "edit_modal_layout_P2.9": "คอลัมน์ขวา editModal = flex column → เนื้อหา: การ์ดบริษัท(1153) + กริดหลัก grid-cols-5(1174: editDocNoInput/editPoInput/editSystemRecordNo / editDateInput+editCategorySelect / editStoreInput / editSender / editSource) + amber tip + การ์ดเอกสาร(editDocTypeSelect+editDocTypeAddBox+บัญชี) + การ์ดใบชั่ง + รายการ(editItemsBody/editItemBadge/addEditItemRow) + ยอดรวม(editTotalInput) | openEditModalItem เติม 3 ช่องอ่านอย่างเดียว (editSystemRecordNo=#xxxxxx / editSource=กลุ่ม vs ส่วนตัว / editSender=ชื่อ+title ID LINE) | badge v3.14.5",
+    "zoom_inline_P2.10": "INLINE zoom (ไม่เปิด window/overlay): createInlineImageZoom(stage,el,opts) → wheel ซูมล็อคจุดเมาส์/ลากเลื่อน/dblclick+พอดีจอคืนขนาด/disabled(opts) | ดูบิลเต็ม: detailImageStage+modalImage (max-w/h 94% fit) + header 'พอดีจอ'=detailImageZoomReset + openDetailItem onload→fitNow | แก้ไขข้อมูลบิล: emImageStage+editModalCanvas + emDraw→fitNow + emZoomReset (head+toolbar) + ครอปปิดซูม(disabled=emCropMode)+เริ่มครอป fitNow ก่อน | ครอป: emCropOverlay/emCropBox/4แฮนเดิล + emToggleCrop↔ยืนยัน + emSave auto-crop | badge v3.14.7"
   },
   "database": {
     "tables": "receipts(RLS anon อ่าน + Realtime + running_number unique + image_md5) / running_number_counter(แถวเดียว atomic) / receipt_links(anon อ่าน) / weight_variances(RLS anon อ่าน — ใหม่ [15]) / receipt_learning(ปิด anon) / doc_types(anon อ่าน is_active) / ai_templates / ai_prompts / ai_feedback_logs / vendor_billing_notes + vendor_billing_items",
@@ -82,7 +106,415 @@
     "ห้ามเขียนไฟล์โปรเจกต์ด้วย PowerShell Set-Content/Out-File — ใช้ Read/Edit/Write tool เท่านั้น (กฎ UTF-8 WriteGuard)"
   ],
   "pendingTasks": [
-    "REDEPLOY ให้ตรงตัวจริง (ทุกครั้ง binary รันจริง ≠ ไฟล์เครื่อง: log 16:04 ยังเป็น gemini-3.8-flash ตัวแรก + EXHAUSTED วน) — verify ที่ RUNTIME: ส่งบิลใหม่ดู log (ก) '🎯 MODEL SELECT' ต้องเป็น flash-lite นำ (ข) STEP 4 เจอ flash-lite ก่อน (ค) ห้ามคำขอค้าง >30 วิ",
+    {
+      "version": "v3.20.0",
+      "date": "2026-09-25",
+      "phase": "phase3_25",
+      "task": "ดูบิลเต็ม = โครงตัวอย่าง Pro UI ตรง ๆ (ยก markup มาทั้งดุ้น — ผูกข้อมูลจริงเข้าช่อง)",
+      "details": [
+        "ซ้าย 42% Image Studio: Top Bar ขาว (เต็มขนาด+อ่านใหม่ AI ย้ายมาแถวนี้) / สเตจ slate-200/60 + grid dots / ปุ่มซูมลอย −/%/+/Fit (ไอคอน minus/plus) / แผงเครื่องมือ grid 5 ปุ่ม + slider ความสว่าง+คมชัด 50-150 (พรีวิว filter)",
+        "ขวา 58%: แถบบน ป้ายจุดเขียว rounded-full + Matrix Code (modalMatrixCode ใหม่) + แท็บ + แก้ไข & รูปภาพ + X",
+        "S1 กล่อง boxed p-3 แถวละ 4 (ประเภท+ชื่อบนใบ/เลขที่/วันที่/อ้างอิง + กำกับภาษีเขียว/PO ฟ้า/หมวด/SRN/ผู้ส่ง/แหล่ง)",
+        "S2 การ์ดคู่ p-5 | S3 ตาราง px-3 py-2.5 หัวเทา | S4 หมายเหตุ min-h-[100px] + แผงยอด (Net Total text-xl + Baht Text gradient)",
+        "CSS เติม .lg:w-[42%] .lg:w-[58%] .flex-grow .shadow-inner .min-h-[100px] .bg-gradient-to-r .from-emerald-50 .to-sky-50 | badge v3.20.0",
+        "ID ระบบครบ 19/19 ตรวจแล้ว — ฟังก์ชันเดิม (openDetailItem/showDetailTab/จับคู่/เทียบน้ำหนัก/1:1) ทำงานครบ",
+        "node --check EXIT=0 | FFFD=0 — ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0..6, v3.20.0)"
+      ]
+    },
+    {
+      "version": "v3.19.6",
+      "date": "2026-09-25",
+      "phase": "phase3_24",
+      "task": "ป็อบอัพดูบิลเต็ม + หน้าแก้ไข เต็มจอ (User: อยากให้เต็มจอ)",
+      "details": [
+        "detailModal + editModal: กล่องเนื้อหา max-w-7xl + max-h-[96vh] → w-full h-full เต็ม viewport",
+        "overlay: ลบ p-2 sm:p-4 รอบนอก → เนื้อหาชิดขอบจอจริง | คง rounded-2xl/โครง v3.19.5/Esc/X | badge v3.19.6",
+        "node --check EXIT=0 | FFFD=0 — ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0..6)"
+      ]
+    },
+    {
+      "version": "v3.19.5",
+      "date": "2026-09-25",
+      "phase": "phase3_23",
+      "task": "ลบการ์ด 'ประเภทเอกสาร & อ้างอิงบัญชี' + หลักการแสดงผล 1:1 + รื้อหน้าแก้ไขธีมเดียวกับดูบิลเต็ม",
+      "details": [
+        "ลบการ์ด modalAccountingInfo ทิ้ง — ชื่อบนใบ→กล่องประเภทเอกสาร S1 / รหัส+กลุ่ม→badge หัวการ์ด / ประโยค VAT+กฎหมาย→tooltip badge / หมายเหตุ→การ์ดแยก (v3.19.4)",
+        "renderDetailAccountingInfo รื้อใหม่: เติม doc_title_text+ธง AI เดา + badge+tooltip + เรนเดอร์การ์ด 'ข้อมูลที่ระบบเก็บ (1:1)' ทุกฟิลด์ JSON ตรงตัว (RECEIPT_FIELD_LABELS 30+ ฟิลด์, toggleRawDataCard)",
+        "editModal: ลบ header BTC + footer เดิม → แถบบนขวา ป้ายโหมดแก้ไข amber + editOriginInfo2 + ยกเลิก/บันทึก(btnSaveEdit เดิม) + X ที่แถบรูป",
+        "editModal ซ้าย: แถบควบคุมขาว + สเตจ slate-200/70 + ปุ่มซูมลอย emZoomStep −/%/+/Fit (emZoomLabelUpdate) + แผงเครื่องมือ grid 5 ปุ่ม + ความสว่าง",
+        "S1+S2 ฟอร์ม: ช่องกรอกหลักลงกล่อง boxed แบบเดียวกับดูบิลเต็ม (กำกับภาษี=เขียว SRN=ฟ้า) — ID/payload ครบไม่แตะ",
+        "CSS เติม .w-52 .max-h-72 .bg-sky-50/60 .last:border-0 | badge v3.19.5",
+        "node --check EXIT=0 | FFFD=0 — ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0..5)"
+      ]
+    },
+    {
+      "version": "v3.19.4",
+      "date": "2026-09-25",
+      "phase": "phase3_22",
+      "task": "รื้อดูบิลเต็มให้เหมือนตัวอย่างจริง ๆ (แก้งาน v3.19.3 — User feedback: ไม่เหมือนตัวอย่างแม้แต่น้อย)",
+      "details": [
+        "ปุ่มซูมลอยมุมล่างซ้ายของรูป −/100%/+/Fit (detailZoomStep ยิง WheelEvent เดียวกับล้อเมาส์ + updateDetailZoomLabel)",
+        "แผงเครื่องมือรูปใต้ภาพ: หมุนซ้าย/ขวา/พลิก/ครอป(พาไปหน้าแก้ไข)/รีเซ็ต — หมุน+พลิกจริงผ่าน opts.extraTransform ใหม่ของ createInlineImageZoom (พรีวิวเท่านั้น ไม่บันทึกไฟล์)",
+        "S1 กล่องข้อมูล boxed 4 ช่องแถว: R1 ประเภท(เขียว+ธงAIเดา)/เลขที่/วันที่/เลขอ้างอิง(modalRefNoBox ใหม่) — R2 ใบกำกับ(modalTaxInvBox ใหม่เขียว)/PO/หมวด/SRN — R3 ผู้ส่ง/แหล่งที่มา",
+        "S2 การ์ดคู่ md:grid-cols-2: ผู้ออก/ผู้ขาย (ชื่อร้าน+vendor_tax_id) | ลูกค้า/บริษัท/ผู้เบิก (company_name+ผู้เบิก/ผู้สั่งจ่าย+งาน) — แถวว่างซ่อน ห้ามเดา",
+        "S3 ตารางหัวแบบตัวอย่าง (#/รายการ/จำนวน/หน่วย/ราคาต่อหน่วย/จำนวนเงิน(บาท)) + tfoot Net Total",
+        "S4 คู่ล่างใหม่: การ์ดหมายเหตุ (modalRemarksBox จาก remark_text) + แผงสรุปยอด (Subtotal/Discount 0.00/Net Total เขียว/ตัวอักษรไทย) — modalRemarkRow เดิมซ่อนถาวรคง ID",
+        "CSS เติม 11 rule (grid-cols-5/bottom-3/left-3/min-h-[60px]/z-20/bg-btc-green-5/h-6/w-px/mx-0.5/break-all/bg-white-95) | badge v3.19.4",
+        "preview_detail_modal.html (ใหม่ — mock เต็มรูปแบบ ทดสอบโครงได้ไม่ต้อง deploy)",
+        "node --check EXIT=0 | FFFD=0 — ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0..4)"
+      ]
+    },
+    {
+      "version": "v3.19.3",
+      "date": "2026-09-25",
+      "phase": "phase3_21",
+      "task": "ดูบิลเต็มแทนโครงด้วยตัวอย่าง Authentic Document เต็มรูปแบบ (ต่อยอด v3.19.2 — ลบ header/footer เดิม ปุ่มรวมจุดเดียว badge ประเภทเอกสาร)",
+      "details": [
+        "ลบ header modal เดิม (BTC badge + h3 + X) — ชื่อร้าน modalSupplierTitle ย้ายไปหัวการ์ดข้อมูลหลัก + ปิดหน้าต่าง = X มุมขวาแถบควบคุมบน (เหมือนตัวอย่าง)",
+        "ซ้าย 40% (CSS เติม .lg\\:w-\\[40\\%\\]): แถบควบคุมบน + สเตจรูป + แถบวิธีใช้ — timestamp ย้ายมาแถบวิธีใช้ (ตัดเป็น 'บันทึก: ...')",
+        "ขวา 60%: แถบบนสุด ป้ายโหมดดูข้อมูล + แท็บ + อ่านใหม่(AI) + แก้ไขข้อมูล & รูปภาพ + X — ลบ footer ล่างทิ้ง (ปุ่มแก้ไข/ปิดไม่ซ้ำ 2 จุดแล้ว)",
+        "S1 หัวการ์ดเพิ่ม badge ประเภทเอกสาร (modalDocTypeBadge/Name/Code — openDetailItem เติมจาก getAccountingDocTypeLoose)",
+        "S2 หัวการ์ดแบบตัวอย่าง (รหัส/กลุ่มขวา) + modalDocTypeName แอมเบอร์หนา + modalDocTitleGuess ย้ายแถวเดียวกัน (ลบตัวซ้ำ)",
+        "S3 ลบ badge 'N รายการ' (เก็บ ID hidden + null-guard) | CSS เติม .md\\:grid-cols-2/3/4 + .whitespace-pre-line | badge v3.17.5→v3.19.3",
+        "node --check EXIT=0 | FFFD=0 — ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0..3)"
+      ]
+    },
+    {
+      "version": "v3.19.2",
+      "date": "2026-09-24",
+      "phase": "phase3_20",
+      "task": "ดูบิลเต็มใช้โครง UI ตัวอย่าง Authentic Document ทั้งหมด (ลิงก์ข้อมูลระบบเรา — ID/แท็บจับคู่คงเดิม)",
+      "details": [
+        "ซ้าย: แถบควบคุมบนขาว + สเตจรูปพื้นเทา + แถบวิธีใช้ (ปุ่มเต็มขนาด/พอดีจอ)",
+        "ขวา: แถบบนสุด ป้ายโหมดดูข้อมูล + แท็บ + ปุ่มแก้ไขข้อมูล & รูปภาพ (ย้ายจาก footer)",
+        "เนื้อหา: การ์ดขาวแยก Section + ค่าเป็นป้ายสี (เลขเขียว/PO ฟ้า/ทะเบียนส้ม/น้ำหนักม่วง) + แถว Baht Text ใต้ตาราง",
+        "ID 54 ตัวครบจุดเดียว | แท็บจับคู่/อ่านใหม่/modalCompareBox เดิม | node --check EXIT=0 | FFFD=0"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0..2)"
+      ]
+    },
+    {
+      "version": "v3.19.1",
+      "date": "2026-09-24",
+      "phase": "phase3_19",
+      "task": "ขยายหน้าต่างดูบิลเต็ม/แก้ไข (max-w-7xl + 96vh + แผงรูป xl:36%)",
+      "details": [
+        "modal ทั้ง 2 (ดูบิลเต็ม+แก้ไข): max-w-6xl→7xl (80rem), max-h 92→96vh, ขอบรอบนอก p-2 sm:p-4",
+        "จอ ≥1280px: แผงรูปซ้าย 38%→36% ให้ฟอร์มขวากว้างขึ้น",
+        "เติม CSS .max-w-7xl/.xl:w-[36%] — แก้ escape ซ้อนยืนยัน codepoint ครบ",
+        "ไม่แตะ ID/JS/Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0+1)"
+      ]
+    },
+    {
+      "version": "v3.19.0",
+      "date": "2026-09-24",
+      "phase": "phase3_18",
+      "task": "รื้อฟอร์มแก้ไขตามตัวอย่าง Authentic Document — การ์ด light-panel แยก Section 1-4 (แก้งาน v3.18.3 ที่เปลี่ยนแค่หัวข้อ)",
+      "details": [
+        "โครงใหม่: ทุก Section เป็นการ์ดขาว .light-panel (bg ขาว+border+shadow) หัว Section ไอคอน+เลขกำกับ+คำกำกับขวา",
+        "S1 ผู้ออกเอกสาร+เลขที่/วันที่/PO/ร้าน/หมวด | S2 ประเภท+กำกับภาษี+เล่ม+อ้างอิง | S3 รายการ+ยอดรวม+แผงสรุป+Baht Text | S4 หมายเหตุ+PO/ใบชั่ง (hidden เดิม)",
+        "แก้ HTML แตกรอบ v3.18.1 | เติม CSS .light-panel/.rounded-2xl/.space-y-*/.md:p-5",
+        "ID 34 ตัวครบจุดเดียว — JS/payload ไม่เปลี่ยน | node --check EXIT=0 | FFFD=0"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3, v3.19.0)"
+      ]
+    },
+    {
+      "version": "v3.18.3",
+      "date": "2026-09-24",
+      "phase": "phase3_17",
+      "task": "ฟอร์มแก้ไขเป็นเอกสารมี Section เลขกำกับ + แผงสรุปยอดแบบใบจริง + จำนวนเงินตัวอักษร (จากตัวอย่าง Authentic Document ที่ User ส่ง)",
+      "details": [
+        "Section 1/2/3 มีหัวเรื่องเลขกำกับตามตัวอย่าง (Document Info / Metadata / รายการสินค้า)",
+        "แผงสรุปยอด: editItemsSum + editTotalDiff (เขียว=ตรง/ส้ม=ส่วนต่าง+tooltip) + editTotalBahtText (thaiBahtText ทดสอบถูกต้อง: เอ็ด/ยี่/ล้าน/สตางค์)",
+        "recalcEditTotal คำนวณ sum ก่อนเช็ค editTotalManual → updateEditSummary เสมอ + openEditModalItem เรียกตอนเปิดฟอร์ม",
+        "ไม่เปลี่ยน ID/ฟังก์ชันบันทึก/payload — node --check EXIT=0 | FFFD=0"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..3)"
+      ]
+    },
+    {
+      "version": "v3.18.2",
+      "date": "2026-09-24",
+      "phase": "phase3_16",
+      "task": "ช่องเล่มที่แยกโชว์เฉพาะบิลเก่าที่มีค่าค้าง (เลิกโชว์ช่องว่างให้บิลใหม่)",
+      "details": [
+        "showBook ตัด keys.book ออก — โชว์เฉพาะ book_no มีค่าจริง && ไม่ซ้ำเล่มที่/เลขที่ ในเลขที่เอกสาร",
+        "label ชี้ชัด: บิลเก่าเท่านั้น — บิลใหม่พิมพ์รวมในเลขที่เอกสาร (5/2680)",
+        "ไม่ลบช่อง/คอลัมน์ Book No. — บิลเก่ายังดู/แก้ได้ + Doc Key ยังใช้ normalize",
+        "node --check EXIT=0 | FFFD=0 | ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0..2)"
+      ]
+    },
+    {
+      "version": "v3.18.1",
+      "date": "2026-09-24",
+      "phase": "phase3_15",
+      "task": "จัดเลย์เอาต์ฟอร์มแก้ไขไล่ตามโครงบิลจริง (ย้ายบล็อกล้วน — ไม่แตะ ID/ฟังก์ชัน)",
+      "details": [
+        "ย้ายตารางรายการสินค้า+ยอดรวมขึ้นกลางเอกสาร (เดิมท้ายสุด) — ไล่ตามบิลจริง: หัวบริษัท→ข้อมูล→รายการ→ยอดรวม",
+        "หมายเหตุ/PO-ใบชั่ง อยู่ส่วนท้าย, กล่องอธิบาย amber ย้ายลงล่างสุด",
+        "ทุก ID ครบจุดเดียว — JS ไม่เปลี่ยน | node --check EXIT=0 | FFFD=0",
+        "scope ตามที่ User ย้ำ: แค่การวางเลย์เอาต์ฟอร์มเฉยๆ ไม่ใช่ช่องทับภาพ"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0+1)"
+      ]
+    },
+    {
+      "version": "v3.18.0",
+      "date": "2026-09-24",
+      "phase": "phase3_14",
+      "task": "ฟิลด์หมายเหตุในเอกสาร (remark_text) แก้ไข/โชว์ได้ + ลดกรอบซ้อนหน้าเอกสารสำหรับ AI + sticky หัวตาราง Matrix/taxonomy",
+      "details": [
+        "remark_text: AI อ่าน+เก็บอยู่แล้ว — เพิ่ม textarea editRemarkInput ในฟอร์มแก้ไข + collectEditPayload + openEditModalItem + normalizeData + ดูบิลเต็ม (modalRemarkRow)",
+        "Code.gs updateReceipt: เขียนชีต Remark Text เมื่อ payload ส่งมา + Supabase patch remark_text (undefined = ไม่ล้างค่าเดิม)",
+        "หน้า AI: ตัดการ์ดกรอบนอก — ตาราง overflow-auto + max-h-[70vh] + thead sticky (bg ทึบ) + หัวคอลัมน์ w-40/w-64",
+        "เติม CSS ขาด: sticky/top-0/z-10/max-h-[70vh]/w-64/w-40 (บทเรียน Phase 2.6)",
+        "node --check ผ่านทั้ง Code.gs + index.html | FFFD=0"
+      ],
+      "status": "DONE — รอ User REDEPLOY BOTH Code.gs + index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1, v3.18.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9, v3.18.0)"
+      ]
+    },
+    {
+      "version": "v3.17.9",
+      "date": "2026-09-24",
+      "phase": "phase3_13",
+      "task": "เติม CSS ที่หายจาก tailwind-build เก่า — แถบตัวนับสรุป + สีไฮไลต์ตาราง Matrix แสดงผลไม่ติด (User: ไม่เห็นมีไฮไลเลย)",
+      "details": [
+        "ต้นตอ: bg-rose-50/text-rose-700/border-rose-200/hover:bg-rose-100/ring-1/ring-slate-400/min-w-[64px]/px-1/border-emerald-100/hover:bg-slate-50/50 ไม่มีใน CSS build — บทเรียน Phase 2.6 ซ้ำ",
+        "เติมใน MISSING UTILITIES (append เท่านั้น) ตามค่า Tailwind v3 — ตรวจบริบทกัน false-positive ก่อนเติม (divide-y/py-2.5/text-slate-300 มีแล้ว)",
+        "verify: สแกนครบ 52/52 class | node --check EXIT=0 | FFFD=0 | ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..9)"
+      ]
+    },
+    {
+      "version": "v3.17.8",
+      "date": "2026-09-24",
+      "phase": "phase3_12",
+      "task": "ปรับตัวเลือก/ป้ายประเภทเอกสารทุกจุดเป็น 'ชื่อไทยนำ + [รหัส] ตามหลัง' ให้ตรงมาตรฐานตาราง Matrix ใหม่",
+      "details": [
+        "accountingDocTypeOptions: option = ชื่อไทย [CODE] (ครอบ editDocTypeSelect + docTypeFilter), value=item.name เดิม — ข้อมูล/AI ไม่กระทบ",
+        "docTypeDisplay/docTypeBadge/updateEditDocTypeTaxHint/renderDetailAccountingInfo — ชื่อไทยนำ, ชิปรหัสล้วน + tooltip ครบ",
+        "ตาราง taxonomy คง [CODE] หัวคอลัมน์ (ตารางอ้างอิงจงใจ)",
+        "ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..8)"
+      ]
+    },
+    {
+      "version": "v3.17.7",
+      "date": "2026-09-24",
+      "phase": "phase3_11",
+      "task": "Prefetch ชุด Prompt เบื้องหลังตั้งแต่เปิดแอป + พลิกตาราง Matrix (แถว=ประเภทเอกสารชื่อไทยนำ, หัวคอลัมน์=ฟิลด์)",
+      "details": [
+        "window.onload เรียก loadAIPrompts(false) เบื้องหลัง — เข้าเมนูครั้งแรกไม่เจอ 'กำลังโหลดตารางเทียบ...' (fallback เดิมยังทำงานถ้า prefetch ไม่ทัน)",
+        "renderFieldMatrixTable พลิกแกน: แถว = ประเภทเอกสาร (กลุ่ม + ชื่อไทยนำหน้า + ชิปรหัส), หัวคอลัมน์ = ฟิลด์ (ชื่อสั้น + tooltip เต็ม)",
+        "เซลล์/สี/คลิกสลับ/ตัวนับสรุป v3.17.6 คงเดิมทั้งหมด — เปลี่ยนแค่แกนตาราง",
+        "ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..7)"
+      ]
+    },
+    {
+      "version": "v3.17.6",
+      "date": "2026-09-24",
+      "phase": "phase3_10",
+      "task": "ตัวนับสรุปเหนือตาราง Matrix: กี่ประเภทยังไม่มีชุด (·) / กี่เซลล์แดงเกินเกณฑ์ / กี่ช่องบังคับยังไม่เปิด",
+      "details": [
+        "HTML: เพิ่ม <div id=matrixSummaryBar> เหนือ aiPromptNotice ก่อนตาราง matrix",
+        "renderFieldMatrixTable เรียก renderMatrixSummaryBar(types, cfgByType, fields) ท้ายฟังก์ชัน — ข้อมูลชุดเดียวกับตาราง",
+        "renderMatrixSummaryBar นับ 3 ค่า: noSet (ไม่มี field_config = ·), redCells (std=N && เปิด = พื้นแดง), missingRequired (std=M && ไม่เปิด = ขอบเข้ม) — วาด chip slate/rose/amber (สีเตือนเมื่อ >0)",
+        "ตัวนับอัปเดตอัตโนมัติทุกครั้งที่ตารางวาดใหม่ รวมตอนคลิกสลับ ✓/✗ optimistic + rollback — ไม่แตะ Code.gs"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..6)"
+      ]
+    },
+    {
+      "version": "v3.17.5",
+      "date": "2026-09-24",
+      "phase": "phase3_9",
+      "task": "ตารางเดียว: เทียบเกณฑ์มาตรฐาน vs ค่าจริง + คลิกเซลล์สลับ ✓/✗ ได้เลย (ลบตารางชุด Prompt แยก)",
+      "details": [
+        "เซลล์คลิกสลับ field_config ทันที (togglePromptField + optimistic + rollback)",
+        "ลบ renderPromptCards/renderPromptFieldBuilder/statusChipPrompt ทั้งหมด",
+        "เซลล์ · = ยังไม่มีชุด prompt คลิกไม่ได้ (ต้องสร้างชุดก่อน)"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..5)"
+      ]
+    },
+    {
+      "version": "v3.17.4",
+      "date": "2026-09-24",
+      "phase": "phase3_8",
+      "task": "รวมชุด Prompt + Matrix เป็นตารางเดียว — เทียบเกณฑ์มาตรฐาน (●/○/–) vs ค่าจริง field_config (✓/✗/·) พร้อมไฮไลต์ความต่าง",
+      "details": [
+        "การ์ดชุด Prompt → ตารางแถวเดียวต่อประเภท (สถานะ+checkbox ฟิลด์+ปุ่มจัดการ)",
+        "renderFieldMatrixTable เทียบ 2 ชั้นในเซลล์เดียว + วาดใหม่หลังโหลด prompts",
+        "แท็บเหลือ 2: ชุด Prompt & Matrix / ตารางประเภทเอกสาร & สิทธิ์ภาษี"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..4)"
+      ]
+    },
+    {
+      "version": "v3.17.3",
+      "date": "2026-09-24",
+      "phase": "phase3_7",
+      "task": "รวมแท็บ \"อ้างอิงบัญชี\" เข้า \"ตารางประเภทเอกสาร & สิทธิ์ภาษี\" (หน้าที่ซ้ำ) — เหลือ 3 แท็บ",
+      "details": [
+        "ลบ aiModeReference/aiModeReferenceView/renderAccountingDocTypeReference ทั้งก้อน",
+        "taxonomy เพิ่มคอลัมน์หมวด (4 หมวด) + ค้นหาครอบคลุม",
+        "setAIMode: prompts/taxonomy/matrix"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0..3)"
+      ]
+    },
+    {
+      "version": "v3.17.2",
+      "date": "2026-09-24",
+      "phase": "phase3_6",
+      "task": "เพิ่มแท็บตารางประเภทเอกสาร & สิทธิ์ภาษี + Matrix ฟิลด์ข้อมูล ในหน้าเอกสารสำหรับ AI (ตาม prompt_builder.md)",
+      "details": [
+        "แท็บ taxonomy: ตาราง 21 ประเภท + ค้นหา + ฟิลเตอร์สิทธิ์ VAT (แหล่งเดียว ACCOUNTING_DOC_TYPES)",
+        "แท็บ matrix: ฟิลด์×ประเภท แบบ ●/○/– อิงเกณฑ์ prompt AI จริง",
+        "setAIMode รองรับ 4 โหมด"
+      ],
+      "status": "DONE — รอ User REDEPLOY index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0+1+2)"
+      ]
+    },
+    {
+      "version": "v3.17.1",
+      "date": "2026-09-24",
+      "phase": "phase3_5",
+      "task": "เปลี่ยนชื่อโชว์ \"ใบชั่ง\" → \"ใบชั่งน้ำหนัก\" (display_name) — ชื่อเก็บ DB/doc_key คง \"ใบชั่ง\" ไม่กระทบบิลเก่า",
+      "details": [
+        "display_name ใน DOC_KNOWLEDGE_BASE + ACCOUNTING_DOC_TYPES + displayDocTypeName() helper",
+        "แก้จุดโชว์: dropdown ประเภท, ดูบิลเต็ม, ตารางอ้างอิง, 3-Way, ข้อความ error จับคู่",
+        "normalizeDocType รับทั้งสองชื่อ → ใบชั่ง (ตัวตนเดิม)"
+      ],
+      "status": "DONE — รอ User REDEPLOY ทั้ง Code.gs + index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0+1)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0+1)"
+      ]
+    },
+    {
+      "version": "v3.17.0",
+      "date": "2026-09-24",
+      "phase": "phase3_4",
+      "task": "เพิ่มประเภทเอกสาร 4 ประเภท (ABB/CUSTOMS/CI/ADV) + สิทธิ์ภาษีซื้อคำนวณจาก doc_type + ชื่อเอกสารบนใบ (doc_title_text) — อ้างอิง prompt_builder.md",
+      "details": [
+        "DOC_KNOWLEDGE_BASE + ACCOUNTING_DOC_TYPES: 17 → 21 ประเภท",
+        "getVatEligibility() ใหม่ใน Code.gs — is_vat_eligible/tax_legal_ref คำนวณ backend ไม่ให้ AI เดา",
+        "prompt เพิ่ม doc_title_text/is_title_explicit/ai_notes + fallback rules คาดเดาประเภทจากองค์ประกอบ",
+        "ดูบิลเต็มโชว์ \"ชื่อบนใบ\" + ธง AI เดา; ai_notes รวมเข้า remark_text",
+        "ไม่แตะ schema DB — ฟิลด์ใหม่เก็บใน output JSON เดิม (แสดงจาก AI response ผ่าน flow เดิม)"
+      ],
+      "status": "DONE — รอ User REDEPLOY ทั้ง Code.gs + index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0, v3.17.0)",
+        "index.html (v3.15.2..10, v3.16.0, v3.17.0)"
+      ]
+    },
+    {
+      "version": "v3.16.0",
+      "date": "2026-09-24",
+      "phase": "phase3_3",
+      "task": "ลบระบบ \"ตัวอย่าง\" (AI Templates/ai_templates) ออกจากระบบทั้งหมด",
+      "details": [
+        "frontend: ลบ aiModeSamplesView + modals + ฟังก์ชัน sample/review ทั้งหมด + drop-zone ในการ์ดชุด prompt",
+        "backend: ลบ dedupeSampleRows/findPendingCandidateBySignature/incrementTemplateUsage/ensureTemplateCandidateIfNeeded/diagnoseAIDocuments/findMatchingTemplates + webhook hook",
+        "resolvePromptInjection เหลือเฉพาะ prompt_text; generateAIPrompt ใช้ความรู้หมวดอย่างเดียว",
+        "คงไว้: ชุด Prompt (ai_prompts) + อ้างอิงบัญชี + ตาราง ai_templates ใน Supabase (ไม่ลบ schema แต่ไม่ใช้แล้ว)"
+      ],
+      "status": "DONE — รอ User REDEPLOY ทั้ง Code.gs + index.html",
+      "pending_deploy": [
+        "Code.gs (v3.15.2+3+4+9, v3.16.0)",
+        "index.html (v3.15.2..10, v3.16.0)"
+      ]
+    },
+    "🧭 v3.15.10 (2026-09-24) เรียงเมนูใหม่: \"เอกสารสำหรับ AI\" ย้ายจากกลุ่มหลักไปกลุ่มล่างกับ ข้อมูลองค์กร/ตั้งค่าระบบ (desktop sidebar + mobile switcher) — โค้ดเสร็จ รอ User REDEPLOY index.html | ทดสอบ: กดเมนู \"เอกสารสำหรับ AI\" ต้องเปิดหน้าถูก + active highlight ถูกตำแหน่งใหม่",
+    "🖼️💥 v3.15.9 (2026-09-24) แก้ต้นตอรากภาพเก่า: ห้ามเขียนทับไฟล์ Drive เดิมแล้ว (Drive แคช thumbnail ตาม file ID ฝั่งเซิร์ฟเวอร์ — v= หลอกไม่ได้) → saveEditedReceiptImage เปลี่ยนเส้นทางหลัก = สร้างไฟล์ใหม่ + ลบไฟล์เดิมถาวรทันที (thumbnail สดการันตี) เขียนทับไฟล์เดิมเหลือเป็นสำรองเมื่อสร้างไม่ได้ — โค้ดเสร็จ รอ User REDEPLOY BOTH Code.gs + index.html | ทดสอบ: แก้รูป+บันทึก → ตาราง/ดูบิลเต็ม/แผงแก้ไขต้องเห็นภาพใหม่เดียวกันทันที + F5 ยังใหม่ | Log: \"สร้างไฟล์ใหม่ ... ลบไฟล์เดิม: deleted (ถาวร)\"",
+    "🔄 v3.15.8 (2026-09-24) ทุกการเปลี่ยนแปลง DB → บังคับรูปทุกรูปโหลดใหม่ (imageEpoch + bumpImageEpoch 6 จุด: edit-save/delete/reanalyze/match-save/realtime/refresh-data; normalizeData ประทับ v=<epoch> ทุกรูป) — โค้ดเสร็จ รอ User REDEPLOY index.html | ทดสอบ: แก้/ลบ/จับคู่/อ่านใหม่ → ตารางโหลดรูปใหม่จากเครือข่ายทั้งตาราง (Network tab เห็น request ใหม่หมด + Console มี \"image epoch bumped\") | แคชยังทำงานปกติระหว่างรอบที่ DB ไม่เปลี่ยน",
+    "🖼️ v3.15.7 (2026-09-24) แก้รูปบิล 3 จุดโชว์ไม่ตรงกัน (ตาราง/ดูบิลเต็ม/แผงแก้ไข): ① withCacheBust เลิก v= ซ้อน 2 ตัว ② freshestImageUrl เลือก v= ใหม่สุดของไฟล์เดียวกัน (ดูบิลเต็ม + normalizeData ใช้) ③ emApplySavedImage รีเฟรชดูบิลเต็มที่เปิดค้างด้วย — โค้ดเสร็จ รอ User REDEPLOY index.html | ทดสอบ: แก้รูป (หมุน/ครอป) บันทึกแล้ว 3 จุดต้องเห็นภาพใหม่เดียวกัน + ปิดหน้าเว็บเปิดใหม่ต้องยังเป็นภาพใหม่ | ถ้า Drive เสิร์ฟภาพเก่าค้างชั่วครู่ (แคชเซิร์ฟเวอร์) ให้รีเฟรชหน้า 1 ครั้ง",
+    "🎨 v3.15.6 (2026-09-24) UI มาตรฐานเดียวกัน Phase 3: badge 29+ จุด→ui-badge (เพิ่ม --orange/--muted-orange/--xs), ปุ่ม 13 จุด→ui-btn--primary (+ui-btn--disabled), ช่องกรอก 47+ จุด→ui-input, แท็บหมวดบิล+ดูบิลเต็ม+เอกสาร AI→ui-tab — โค้ดเสร็จ รอ User REDEPLOY index.html | ทดสอบ: สลับทุกเมนูดูความสม่ำเสมอ + กดแท็บ 3 หมวดบิลสลับ active ถูกต้อง | คงเดิมตั้งใจ: ชิป BTC/AI, mobile nav, ปุ่ม outline hover เขียว, ชิป 3-Way ใหญ่",
+    "🏷️ v3.15.5 (2026-09-24) ป้าย + ฟิลเตอร์ \"วันที่รอตรวจ\" บนหน้าเว็บ (จับจาก review_reason ข้อความเติมเดือน/ปีปัจจุบัน — helper isDateFallbackItem) — โค้ดเสร็จ รอ User REDEPLOY index.html | ทดสอบ: (1) ส่งบิลวันที่เบลอ → ตาราง/การ์ด/ดูบิลเต็มต้องมีป้ายส้ม \"วันที่รอตรวจ\" (2) ฟิลเตอร์ dropdown \"วันที่รอตรวจ (ระบบเติมเดือน/ปีแทน)\" ต้องโชว์เฉพาะบิลกลุ่มนี้ (3) แก้วันที่ในฟอร์มแก้ไขแล้วบันทึก → ป้ายต้องหาย (review_reason ใหม่ไม่มีข้อความเติมเดือน/ปี)",
+    "📅 v3.15.4 (2026-09-24) วันที่ในบิลอ่านไม่ชัด → เติมได้เฉพาะ \"เดือน/ปีปัจจุบัน\" = วันที่ 01 ของเดือน (YYYY-MM-01) — \"วัน\" ต้องอ่านจากใบเท่านั้นห้ามเอาวันนี้แทน (validateReceiptData เติม + date_fallback_used + ติดธงรีวิว ไม่ตีกลับให้ถ่ายใหม่) — โค้ดเสร็จ รอ User REDEPLOY Code.gs (แนะนำ deploy index.html พร้อมกันเพราะ badge v3.15.3) แล้วทดสอบ: ส่งบิลวันที่เบลอ/ไม่มีวันที่ → บันทึกได้ด้วยวันที่วันนี้ + ธงรอตรวจ + เหตุผลแจ้งให้คนแก้วันที่ตรงใบ | หมายเหตุ: ทำร่วมกับ v3.15.2 (รวมเล่มที่/เลขที่) ที่ยังรอ deploy อยู่ด้วย — deploy ครั้งเดียวได้ทั้งคู่",
+    "🔗 v3.15.2 (2026-09-24) รวม เล่มที่/เลขที่เอกสาร เป็นช่องเดียว — โค้ดเสร็จ รอ User REDEPLOY BOTH Code.gs + index.html แล้วทดสอบ: (1) ส่งบิลใหม่ที่มีเล่มที่ 5 + เลขที่ 2680 → ช่องเลขที่เอกสารต้องเป็น \"5/2680\" (2) ส่งใบเดิมที่เคยบันทึกแบบแยกช่อง (book_no=5, doc_no=2680) → ต้องขึ้น \"บิลซ้ำ\" (doc_key ตรงกันแล้วผ่าน splitCombinedDocNo) (3) ฟอร์มแก้ไข: บิลใหม่แบบรวม → ช่องเล่มที่แยกถูกซ่อน, บิลเก่าแยกช่อง → ยังโชว์ค่าเดิม (กฎมีค่า = โชว์เสมอ) | ห้าม migrate ข้อมูลเก่า — book_no คงอยู่ทุกชั้น บิลเก่า doc_key เดิมไม่เปลี่ยน",
+    "🎯 ล่าสุด (Phase 2.10i) REDEPLOY Code.gs แล้วทดสอบ classification-first v2: (1) ใบมีชื่อประเภทบนหัวใบ → doc_type ตรงตามใบ (2) ใบไม่มีชื่อประเภท → จำแนกจากลักษณะ/ติดรีวิว ไม่อ่านมั่ว (3) วันที่อ่านไม่ได้ → ตีกลับให้ถ่ายใหม่ ห้ามเป็นวันนี้ (4) extract/classify ขัดแย้ง → ติดธงตรวจสอบ + Log ⚠️ DOC-TYPE CONFLICT",
     "🔴 บล็อก LINE 429 'monthly limit' — โควตาส่งข้อความรายเดือนหมด (ไม่ใช่โค้ด): รอเดือนใหม่ หรืออัปเกรดแพลน LINE ก่อนทดสอบต่อ แล้วตรวจ Flex 2 แบบ (บันทึกแล้ว/บิลมีในระบบแล้ว) + ส่งบิลซ้ำ → STEP 2-DUP ตอบทันที",
     "TR backfill done (counter 349) + variance เสร็จ รอผล count weight_variances",
     "ทดสอบ: ชื่อไฟล์ Drive มี TR-xxxx_เลขเอกสาร / เว็บโชว์ป้าย TR / ยางธง ⚖️ ในแท็บจับคู่",
@@ -95,7 +527,9 @@
     "🆕 Phase 2.5 (2026-09-23) User ย้ำ: 'เอาแบบเดิมทั้งหมด มาตรฐานทางเดียวกันทุกเมนู + แก้ตัวอักษรขาว/กลืนพื้น ปุ่ม+ข้อมูล' — แก้แล้ว 5 ชุด: disabled save ปุ่มคู่ (text-white→slate-600) / .ui-btn--primary:disabled สีเข้มขึ้น / chip หัวโมเดล 5 เมนู = bg-btc-green สูตรเดียว / hover เขียวเหลือ btc-green-hover / mobile nav ย้อนกลับเขียวแบบเดิม + input&placeholder guard — node --check EXIT=0, bad-patterns=0 — REDEPLOY แล้วไล่ดู: (ก) ปุ่มบันทึกยังไม่เลือก=เข้มอ่านออก (ข) chip หัวโมเดลทุกใบเขียวเหมือนกัน (ค) พิมพ์ในช่องกรอก/placeholder อ่านชัดทุกเมนู (ง) mobile nav เขียวเหมือนเดิม — ยังมีจุดขาว/กลืนพื้นส่งภาพมาทันที",
     "🎨🆕 Phase 2.6 (2026-09-23) เติม CSS ที่หายจาก build 130 class แล้ว (หัวตาราง 3-Way สี 1/2/3, bg-slate-200 ปุ่ม disabled, KPI icon, min-w[1600px] ฯลฯ) + badge v3.14.1 — รอ redeploy index.html แล้วเช็ค: หัวตารางส่วน 1/2/3 มีแถบสีครบ + ตาราง 3-Way กว้าง 1600px + ป้ายมุมซ้าย = v3.14.1",
     "🔑🆕 Phase 2.7 (2026-09-23) แก้ SESSION_EXPIRED ตอน 'บันทึกการแก้ไข': backend เพิ่ม sliding session (apiSessionValid ต่ออายุอัตโนมัติเมื่อเหลือ <50% TTL) + frontend handleSessionExpired/postLoginRetry 4 จุด (ลบบิล/บันทึกรูป/บันทึกแก้ไข/จับคู่) → ล็อกอินใหม่แล้วทำต่อให้อัตโนมัติ + badge v3.14.2 — ⚠️ ต้อง redeploy BOTH Code.gs + index.html แล้วทดสอบ: เปิดค้าง >2 ชม. (หรือล้าง sessionStorage/btc_api_token) → กดบันทึกแก้ไข → ต้องเด้งล็อกอิน → กรอกรหัส → บันทึกต่อเองสำเร็จ + เช็ค badge v3.14.2",
-    "🖼️🆕 Phase 2.8 (2026-09-23) แผงแก้ไขรูปในหน้าต่างแก้ไขข้อมูลบิล (editModalCanvas + หมุน/พลิก/ความสว่าง/บันทึกรูปทับไฟล์เดิม ใช้พร้อมฟอร์ม) — redeploy เฉพาะ index.html แล้วทดสอบ: กด 'แก้ไขข้อมูลบิล' → เห็น toolbar แก้รูปซ้ายทันที → หมุน/ปรับแสง → กด 'บันทึกรูป' → รูปเปลี่ยนโดยฟอร์มไม่ปิด/ข้อมูลไม่หาย → ครอปใช้ 'ตัวแก้ไขเต็มรูปแบบ' → เช็ค badge v3.14.4"
+    "🖼️🆕 Phase 2.8 (2026-09-23) แผงแก้ไขรูปในหน้าต่างแก้ไขข้อมูลบิล (editModalCanvas + หมุน/พลิก/ความสว่าง/บันทึกรูปทับไฟล์เดิม ใช้พร้อมฟอร์ม) — redeploy เฉพาะ index.html แล้วทดสอบ: กด 'แก้ไขข้อมูลบิล' → เห็น toolbar แก้รูปซ้ายทันที → หมุน/ปรับแสง → กด 'บันทึกรูป' → รูปเปลี่ยนโดยฟอร์มไม่ปิด/ข้อมูลไม่หาย → ครอปใช้ 'ตัวแก้ไขเต็มรูปแบบ' → เช็ค badge v3.14.4",
+    "📋🆕 Phase 2.9 (2026-09-23) เลย์เอาต์ฟอร์มแก้ไข = แบบเดียวกับ 'ดูบิลเต็ม' (การ์ดบริษัท + กริด 5 ช่อง + เลขที่รายการระบบ/ผู้ส่งบิล/แหล่งที่มา อ่านอย่างเดียว + ช่องหลักแก้ได้) + badge v3.14.5 — REDEPLOY index.html แล้วตรวจสายตา: (1) เปิด 'แก้ไขข้อมูลบิล' เห็นการ์ดบริษัท+กริดเหมือนดูบิลเต็ม (2) เลขที่รายการระบบเป็น #xxxxxx, ผู้ส่งบิล=ชื่อ(+tooltip ID), แหล่งที่มา=กลุ่ม/ส่วนตัว (3) แก้ช่องหลักแล้วบันทึกทับได้เหมือนเดิม (4) การ์ดเดิมทั้งหมด (amber/ประเภทเอกสาร/ใบชั่ง/รายการ/ยอดรวม) อยู่ครบใต้กริด",
+    "🔍🆕 Phase 2.10+2.10b+2.10c (2026-09-23) ครอปในแผงแก้ไขรูป + ซูม INLINE + ลบปุ่มแก้ไขรูปบิลจากดูบิลเต็ม + บันทึกการแก้ไขปุ่มเดียว(รูป+ข้อมูล) + badge v3.14.8 + Hotfix Code.gs oldPo — ⚠️ REDEPLOY BOTH Code.gs + index.html แล้วทดสอบ: (1) ดูบิลเต็ม → ไม่มีปุ่ม แก้ไขรูปบิล แล้ว (ล้อเมาส์บนรูปซูม/ลากได้ตามเดิม) (2) แก้ไขข้อมูลบิล → หมุน/พลิก/ครอป/ความสว่างรูป แล้วกด 'บันทึกการแก้ไข' ปุ่มเดียว = บันทึกทั้งรูป (ไฟล์ใหม่ Drive + URL อัปเดต) และข้อมูล ต้องไม่มี error 'oldPo is not defined' (3) ไม่แก้รูป แต่มักแก้ข้อมูล → ปุ่มเดิมทำงานเหมือนเดิม (4) tab Log ต้องมีรายการ ✏️ EDIT (5) เช็ค badge v3.14.8"
   ],
   "rules_acknowledged": [
     "Targeted Editing Only",
@@ -106,5 +540,7 @@
     "No Guessing Data",
     "Cascading Consistency Check",
     "UTF-8 File WriteGuard"
-  ]
+  ],
+  "last_task_2026_09_25f": "📏 v3.21.4 (User: \"ข้อมูลหลักเอกสาร: กับ ชื่อบริษัท (ผู้สั่งซื้อ): ป้าย กับส่วนแสดงข้อมูลให้มันอยู่บรรทัดเดียวกันได้มั๊ย ทั้งสองฝั่งซ้าย ขวา\") — (1) ทำคลาสกลาง .matrix-row = \"ป้ายซ้ายกว้างคงที่ + ค่าขวา บรรทัดเดียว\" ใช้ทั้งโหมดดูข้อมูล (.matrix-value) และโหมดแก้ไข (.ui-input ที่ mount เข้ามาในแถวเดียวกัน) — CSS ใช้ :not(.hidden) สำคัญมาก เพราะเลขที่ PO/เลขใบกำกับภาษี ถูก JS สั่งซ่อนด้วย .hidden (ถ้าเขียน display:flex ตรง ๆ จะชนะ .hidden แล้วโชว์ช่องว่างทุกใบ) (2) เปลี่ยน markup กริด \"ข้อมูลหลักเอกสาร\" (เต็มความกว้างการ์ดแล้ว — ของเดิมเป็นกริดซ้อนที่มีลูกเดียว เนื้อหายืดแค่ครึ่งซ้าย 336/696px) + การ์ด \"ชื่อบริษัท (ผู้สั่งซื้อ)\" (3 ช่อง ใช้ .matrix-row และเลิกแบ่ง 2 คอลัมน์) + การ์ดคู่ผู้ขาย/ผู้ซื้อ md:grid-cols-2 → xl:grid-cols-2 (3) JS mountEditControlsIntoView: labelCell()/subField() สร้าง .matrix-row (ป้าย+ช่องกรอกบรรทัดเดียว), เลขอ้างอิงใช้ set(\"modalRefNoBox\",\"editRefNoInput\") (ของเดิมต่อท้ายเซลล์ → ช่องกรอกตกบรรทัดใหม่), จุดเกาะกล่อง + เพิ่มประเภทเอกสารใหม่ ใช้ #modalInfoGrid (4) 🐛 เจอบั๊กสลักคัญระหว่างตรวจ: คอมเมนต์ SECTION 2 ปิดด้วย */ แทน --> → เบราว์เซอร์กลืน \"การ์ดชื่อร้าน/ผู้ออกเอกสาร\" ทั้งใบ + ตัวห่อการ์ดคู่ เป็นคอมเมนต์ (getElementById(\"modalSellerName\") = null) — แก้เป็น --> แล้ว (5) 🧩 เติม CSS ที่บิลด์ไม่มีอีก: break-words, items-baseline, xl:grid-cols-2 (6) วัดพรีวิวจริง 1400/1280/1024/768/500px × ดู/แก้ × ใบกำกับภาษี/ใบสั่งซื้อ/ใบชั่ง: ป้าย+ค่าบรรทัดเดียวทุกช่อง (dy≤10px) ป้ายไม่ตัดบรรทัด ค่าไม่แคบกว่า 60px ไม่มี overflow แนวนอน จำนวนช่องต่อแถว 2-2-2-2-2 / 2-2-2-2-1 / 2-2-1-2-1 (คอลัมน์ไม่เลื่อน) การ์ดคู่ ≥1280 = 2 คอลัมน์ (344px) ต่ำกว่านั้นซ้อน (556px) console error = 0 (7) เครื่องมือตรวจถาวรของงานนี้: tmp_check_syntax.js (syntax/FFFD/id ซ้ำ/id ที่อ้างแล้วไม่มี) + tmp_check_nesting.js (tag balance + id ที่ถูกคอมเมนต์กลืน + สายพ่อ-แม่ของ id) — ควรรันก่อนสรุปทุกครั้งที่แก้ markup | ที่เหลือ: จอ ≤500px แถบหัว \"ข้อมูลหลักเอกสาร:\" ล้นแนวนอน ~31px (ไม่ใช่ช่องข้อมูล) + คลาสที่ markup ใช้แต่หายจาก CSS อีก ~31 ตัว | สถานะ: ✅ เสร็จ — ⚠️ REDEPLOY index.html อย่างเดียว (Code.gs/SQL ไม่แตะ) | badge v3.21.0 → v3.21.4",
+  "last_task_2026_09_25g": "🕒 v3.21.5 (User: \"id=modalTimestamp ยังจำเป็นต้องมีอยู่มั้ยครับ\") — คำตอบ: ยังทำงานอยู่จริง ไม่ใช่โค้ดตาย (มีแค่ 2 จุดอ้าง ID: markup ในหัวข้อ \"เครื่องมือปรับแต่งรูปภาพ\" + JS ใน openDetailItem) แต่ข้อมูลซ้ำบางส่วน: วันที่ในบิล ซ้ำกับช่อง \"วันที่เอกสาร\" (modalDate) แล้ว / เวลาที่บันทึก + ⚠️ รอตรวจ+เหตุผล ยังมีแค่ที่นี่ในโหมดดูข้อมูล | User เลือก: เก็บไว้ แต่ตัดวันที่ซ้ำออก → tsText เหลือ 'บันทึก: ' + formatRecordDateTime(item.timestamp) + (needs_review ? ' | ⚠️ รอตรวจ: ...' : '') ไม่แตะ markup/CSS (span + truncate + title ใช้ได้เหมือนเดิม) | ซิงก์ tmp_preview_detail_mock.js (~บรรทัด 339) + rebuild preview_detail_modal.html | Check: tmp_check_syntax.js EXIT=0 (syntax/FFFD/id ซ้ำ) + tmp_check_nesting.js EXIT=0 (tag balance / ไม่มี id ถูกคอมเมนต์กลืน) + พรีวิวจริง innerText/title ถูกต้อง ไม่ทับป้ายซ้าย ไม่มี overflow แนวนอน + ข้อความยาวยัง truncate ด้วย ellipsis | หมายเหตุ: คลาส max-w-[55%] ไม่มีใน CSS บิลด์ (maxWidth=none) แต่ทรงยังถูกเพราะ flex + min-w-0 + truncate — ไม่ต้องเติม | สถานะ: ✅ เสร็จ — ⚠️ REDEPLOY index.html อย่างเดียว (Code.gs/SQL ไม่แตะ) | badge v3.21.4 → v3.21.5"
 }
